@@ -1,9 +1,5 @@
 import type { BetterAuthPluginDBSchema } from "@better-auth/core/db";
-import { multiEmail } from "..";
 import { MODEL_MULTI_EMAIL } from "../const";
-import { email } from "zod";
-import { isPrimary } from "node:cluster";
-import { updated } from "$app/state";
 
 export const schema = {
    /**
