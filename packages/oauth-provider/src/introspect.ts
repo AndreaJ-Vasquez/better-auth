@@ -1,9 +1,10 @@
 import type { GenericEndpointContext } from "@better-auth/core";
 import { logger } from "@better-auth/core/env";
-import { verifyJwsAccessToken } from "better-auth/oauth2";
+import { getJwks, verifyJwsAccessToken } from "better-auth/oauth2";
 import type { Session, User } from "better-auth/types";
 import { APIError } from "better-call";
 import type { JSONWebKeySet, JWTPayload } from "jose";
+import { compactVerify, createLocalJWKSet } from "jose";
 import { decodeRefreshToken } from "./token";
 import type {
 	OAuthOpaqueAccessToken,
@@ -14,6 +15,7 @@ import type {
 } from "./types";
 import {
 	basicToClientCredentials,
+	decryptStoredClientSecret,
 	getClient,
 	getJwtPlugin,
 	getStoredToken,
@@ -391,6 +393,136 @@ async function resolveIntrospectionSub(
 		return { ...payload, sub: resolvedSub };
 	}
 	return payload;
+}
+
+/**
+ * Validates an ID token (JWT) by verifying its signature and claims.
+ * ID tokens can be signed either with the JWT plugin's keys (JWK) or
+ * with the client secret (HS256) when disableJwtPlugin is set.
+ *
+ * @returns The decoded JWT payload
+ *
+ * @internal
+ */
+export async function validateIdToken(
+	ctx: GenericEndpointContext,
+	opts: OAuthOptions<Scope[]>,
+	token: string,
+	clientId?: string,
+): Promise<JWTPayload> {
+	const jwtPlugin = opts.disableJwtPlugin
+		? undefined
+		: getJwtPlugin(ctx.context);
+	const jwtPluginOptions = jwtPlugin?.options;
+
+	let idTokenPayload: JWTPayload | undefined;
+
+	if (opts.disableJwtPlugin) {
+		// When JWT plugin is disabled, ID tokens are signed with the client secret (HS256)
+		if (!clientId) {
+			throw new APIError("BAD_REQUEST", {
+				error_description:
+					"client_id is required to validate ID token without JWT plugin",
+				error: "invalid_request",
+			});
+		}
+
+		const client = await getClient(ctx, opts, clientId);
+		if (!client || client.disabled) {
+			throw new APIError("BAD_REQUEST", {
+				error_description: "invalid client",
+				error: "invalid_client",
+			});
+		}
+
+		if (!client.clientSecret) {
+			throw new APIError("BAD_REQUEST", {
+				error_description: "client secret required to verify ID token",
+				error: "invalid_client",
+			});
+		}
+
+		const secret = await decryptStoredClientSecret(
+			ctx,
+			opts.storeClientSecret,
+			client.clientSecret,
+		);
+		const key = new TextEncoder().encode(secret);
+
+		try {
+			const { payload } = await compactVerify(token, key);
+			const decoded = new TextDecoder().decode(payload);
+			idTokenPayload = JSON.parse(decoded);
+		} catch {
+			throw new APIError("BAD_REQUEST", {
+				error_description: "invalid ID token signature",
+				error: "invalid_token",
+			});
+		}
+	} else {
+		// When JWT plugin is enabled, ID tokens are signed with the JWK keys
+		const jwksUrl =
+			jwtPluginOptions?.jwks?.remoteUrl ??
+			`${ctx.context.baseURL}${jwtPluginOptions?.jwks?.jwksPath ?? "/jwks"}`;
+
+		try {
+			const jwks = await getJwks(token, {
+				jwksFetch: jwksUrl,
+			});
+			const { payload } = await compactVerify(token, createLocalJWKSet(jwks));
+			const decoded = new TextDecoder().decode(payload);
+			idTokenPayload = JSON.parse(decoded);
+		} catch {
+			throw new APIError("BAD_REQUEST", {
+				error_description: "invalid ID token signature",
+				error: "invalid_token",
+			});
+		}
+	}
+
+	if (!idTokenPayload) {
+		throw new APIError("BAD_REQUEST", {
+			error_description: "missing ID token payload",
+			error: "invalid_token",
+		});
+	}
+
+	// Validate issuer
+	const issuer = jwtPluginOptions?.jwt?.issuer ?? ctx.context.baseURL;
+	if (issuer !== idTokenPayload.iss) {
+		throw new APIError("BAD_REQUEST", {
+			error_description: "invalid issuer",
+			error: "invalid_token",
+		});
+	}
+
+	// Validate audience
+	if (clientId) {
+		const idTokenAudience =
+			typeof idTokenPayload.aud === "string"
+				? [idTokenPayload.aud]
+				: idTokenPayload.aud;
+		if (!idTokenAudience?.includes(clientId)) {
+			throw new APIError("BAD_REQUEST", {
+				error_description: "audience mismatch",
+				error: "invalid_token",
+			});
+		}
+	}
+
+	// Validate expiration
+	if (
+		idTokenPayload.exp &&
+		idTokenPayload.exp < Math.floor(Date.now() / 1000)
+	) {
+		throw new APIError("BAD_REQUEST", {
+			error_description: "ID token expired",
+			error: "invalid_token",
+		});
+	}
+
+	idTokenPayload.active = true;
+	return idTokenPayload;
 }
 
 export async function introspectEndpoint(

@@ -1,6 +1,12 @@
 import type { JWSAlgorithms } from "better-auth/plugins";
 import type { Prompt } from ".";
 
+export type TokenTypeIdentifier =
+	//Based on RFC 6749, but with the addition of token exchange token types specified in RFC 8693
+	| "urn:ietf:params:oauth:token-type:access_token"
+	| "urn:ietf:params:oauth:token-type:refresh_token"
+	| "urn:ietf:params:oauth:token-type:id_token";
+
 /**
  * Supported grant types of the token endpoint
  */
@@ -9,10 +15,11 @@ export type GrantType =
 	// | "implicit" // NEVER SUPPORT - deprecated in oAuth2.1
 	// | "password" // NEVER SUPPORT - deprecated in oAuth2.1
 	| "client_credentials"
-	| "refresh_token";
-// | "urn:ietf:params:oauth:grant-type:device_code"  // specified in oAuth2.1 but not yet implemented
-// | "urn:ietf:params:oauth:grant-type:jwt-bearer"   // unspecified in oAuth2.1
-// | "urn:ietf:params:oauth:grant-type:saml2-bearer" // unspecified in oAuth2.1
+	| "refresh_token"
+	// | "urn:ietf:params:oauth:grant-type:device_code"  // specified in oAuth2.1 but not yet implemented
+	// | "urn:ietf:params:oauth:grant-type:jwt-bearer"   // unspecified in oAuth2.1
+	// | "urn:ietf:params:oauth:grant-type:saml2-bearer" // unspecified in oAuth2.1
+	| "urn:ietf:params:oauth:grant-type:token-exchange"; // specified in RFC8693
 
 export type AuthMethod =
 	| "client_secret_basic" // Basic header
@@ -282,7 +289,7 @@ export interface OAuthClient {
 	software_version?: string;
 	software_statement?: string;
 	//---- Authentication Metadata ----//
-	redirect_uris: string[];
+	redirect_uris?: string[];
 	post_logout_redirect_uris?: string[];
 	token_endpoint_auth_method?:
 		| "none"

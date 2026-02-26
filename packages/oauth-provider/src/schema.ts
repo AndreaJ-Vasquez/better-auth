@@ -35,6 +35,11 @@ export const schema = {
 				type: "string[]",
 				required: false,
 			},
+			enableTokenExchange: {
+				type: "boolean",
+				required: false,
+				defaultValue: false,
+			},
 			// Recommended client data
 			userId: {
 				type: "string",

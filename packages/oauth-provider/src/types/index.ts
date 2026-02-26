@@ -3,7 +3,7 @@ import type { InferOptionSchema, Session, User } from "better-auth/types";
 import type { JWTPayload } from "jose";
 import type { schema } from "../schema";
 import type { Awaitable } from "./helpers";
-import type { GrantType } from "./oauth";
+import type { GrantType, TokenTypeIdentifier } from "./oauth";
 
 export type {
 	AuthServerMetadata,
@@ -28,6 +28,23 @@ export type AuthorizePrompt =
 	| Prompt
 	| "login consent"
 	| "select_account consent";
+
+export type RequestedTokenExhangeType = Extract<
+	TokenTypeIdentifier,
+	| "urn:ietf:params:oauth:token-type:access_token"
+	| "urn:ietf:params:oauth:token-type:refresh_token"
+>;
+
+export type ActorTokenExhangeType = Extract<
+	TokenTypeIdentifier,
+	| "urn:ietf:params:oauth:token-type:access_token"
+	| "urn:ietf:params:oauth:token-type:id_token"
+>;
+
+export type SubjectTokenExhangeType = Extract<
+	TokenTypeIdentifier,
+	"urn:ietf:params:oauth:token-type:access_token"
+>;
 
 export interface OAuthOptions<
 	Scopes extends readonly Scope[] = InternallySupportedScopes[],
@@ -672,6 +689,34 @@ export interface OAuthOptions<
 	 * @see https://openid.net/specs/openid-connect-core-1_0.html#PairwiseAlg
 	 */
 	pairwiseSecret?: string;
+
+	tokenExchange?: {
+		/**
+		 * Whether to enable impersonation through token exchange.
+		 * By default only delegation is allowed for security reasons
+		 * as impersonation can be dangerous if not implemented correctly.
+		 *
+		 * When disabled, actor_token is required
+		 * @default false
+		 */
+		allowImpersonation?: boolean;
+		/**
+		 * Token types that can be provided as the subject_token
+		 * Only access token is allowed for now
+		 * @default: ["urn:ietf:params:oauth:token-type:access_token"]
+		 */
+		allowedSubjectTokenTypes?: SubjectTokenExhangeType[];
+		/**
+		 * Token types that can be provided as the actor_token in a delegation request
+		 * @default: ["urn:ietf:params:oauth:token-type:access_token", "urn:ietf:params:oauth:token-type:id_token"]
+		 */
+		allowedActorTokenTypes?: ActorTokenExhangeType[];
+		/**
+		 * Token type that can be requested to exchange for the subject_token
+		 * @default: ["urn:ietf:params:oauth:token-type:access_token"]
+		 */
+		allowedRequestedTokenTypes?: RequestedTokenExhangeType[];
+	};
 }
 
 export interface OAuthAuthorizationQuery {
@@ -919,6 +964,10 @@ export interface SchemaClient<
 	subjectType?: "public" | "pairwise";
 	/** Reference to the owner of this client. Eg. Organization, Team, Profile */
 	referenceId?: string;
+	/**
+	 * Whether to allow this client to use the token exchange endpoint
+	 */
+	enableTokenExchange?: boolean;
 	/**
 	 * Additional metadata about the client.
 	 */

@@ -112,6 +112,15 @@ export const oauthProvider = <O extends OAuthOptions<Scope[]>>(options: O) => {
 		storeClientSecret: options.disableJwtPlugin ? "encrypted" : "hashed",
 		storeTokens: "hashed",
 		grantTypes: ["authorization_code", "client_credentials", "refresh_token"],
+		tokenExchange: {
+			allowImpersonation: false,
+			allowedActorTokenTypes: [
+				"urn:ietf:params:oauth:token-type:access_token", 
+				"urn:ietf:params:oauth:token-type:id_token"
+			],
+			allowedRquestedTokenTypes: ["urn:ietf:params:oauth:token-type:access_token"],
+			allowedSubjectTokenTypes: ["urn:ietf:params:oauth:token-type:access_token"]
+		},
 		...options,
 		scopes: Array.from(scopes),
 		claims: Array.from(claims),

@@ -7,13 +7,16 @@ import type { Session, User } from "better-auth/types";
 import type { JWTPayload } from "jose";
 import { SignJWT } from "jose";
 import type {
+	ActorTokenExhangeType,
 	OAuthOptions,
 	OAuthRefreshToken,
+	RequestedTokenExhangeType,
 	SchemaClient,
 	Scope,
+	SubjectTokenExhangeType,
 	VerificationValue,
 } from "./types";
-import type { GrantType } from "./types/oauth";
+import type { GrantType, TokenTypeIdentifier } from "./types/oauth";
 import { userNormalClaims } from "./userinfo";
 import {
 	basicToClientCredentials,
@@ -26,6 +29,7 @@ import {
 	storeToken,
 	validateClientCredentials,
 } from "./utils";
+import { validateAccessToken, validateIdToken } from "./introspect";
 
 /**
  * Handles the /oauth2/token endpoint by delegating
@@ -1080,4 +1084,328 @@ async function handleRefreshTokenGrant(
 		},
 		authTime,
 	);
+}
+
+/**
+ * Obtain a token by exchanging another token from a trusted issuer.
+ * this is useful for delegating access across different services or domains without exposing user credentials.
+ *
+ * Implements RFC8693 - https://datatracker.ietf.org/doc/html/rfc8693
+ * @param ctx
+ * @param opts
+ */
+export async function handleTokenExchangeGrant(
+	ctx: GenericEndpointContext,
+	opts: OAuthOptions<Scope[]>,
+) {
+	const authorization = ctx.request?.headers.get("authorization") || null;
+
+	let {
+		client_id,
+		client_secret,
+		subject_token,
+		subject_token_type,
+		scope,
+		actor_token,
+		actor_token_type,
+		requested_token_type,
+	}: {
+		client_id?: string;
+		client_secret?: string;
+		requested_token_type?: RequestedTokenExhangeType;
+		subject_token?: string;
+		subject_token_type?: SubjectTokenExhangeType;
+		resource?: string;
+		scope?: string;
+		actor_token?: string;
+		actor_token_type?: ActorTokenExhangeType;
+	} = ctx.body;
+
+	const { tokenExchange } = opts;
+
+	//convert basic authorization
+	if (authorization?.startsWith("Basic ")) {
+		const res = basicToClientCredentials(authorization);
+		client_id = res?.client_id;
+		client_secret = res?.client_secret;
+	}
+	if (!client_id) {
+		throw new APIError("BAD_REQUEST", {
+			error_description: "Missing required client_id",
+			error: "invalid_grant",
+		});
+	}
+	if (!client_secret) {
+		throw new APIError("BAD_REQUEST", {
+			error_description: "Missing required client_secret for token",
+			error: "invalid_grant",
+		});
+	}
+
+	if (!subject_token) {
+		throw new APIError("BAD_REQUEST", {
+			error_description: "subject_token is required",
+			error: "invalid_request",
+		});
+	}
+
+	if (!tokenExchange?.allowImpersonation && !actor_token) {
+		throw new APIError("BAD_REQUEST", {
+			error_description: "actor_token is required in delegation mode",
+			error: "invalid_request",
+		});
+	}
+
+	if (actor_token && !actor_token_type) {
+		throw new APIError("BAD_REQUEST", {
+			error_description:
+				"actor_token_type is required when actor_token is provided",
+			error: "invalid_request",
+		});
+	}
+
+	if (
+		requested_token_type &&
+		!tokenExchange?.allowedRequestedTokenTypes?.includes(requested_token_type)
+	) {
+		throw new APIError("BAD_REQUEST", {
+			error_description: "requested_token_type is not allowed",
+			error: "invalid_request",
+		});
+	}
+
+	//Verify client credential
+	const client = await validateClientCredentials(
+		ctx,
+		opts,
+		client_id,
+		client_secret,
+		scope ? scope.split(" ") : undefined,
+	);
+
+	if (
+		client.grantTypes &&
+		!client.grantTypes.includes(
+			"urn:ietf:params:oauth:grant-type:token-exchange",
+		)
+	) {
+		throw new APIError("BAD_REQUEST", {
+			error_description: "Client not authorized to use token exchange grant",
+			error: "unauthorized_client",
+		});
+	}
+
+	//Public clients are not allowed to use this grant as it involves exchanging tokens which may have elevated privileges
+	if (client.public) {
+		throw new APIError("BAD_REQUEST", {
+			error_description:
+				"Public clients are not allowed to use token exchange grant",
+			error: "invalid_client",
+		});
+	}
+
+	/**
+	 * TWO MODE:
+	 * IMPERSONATION: Client exchanges its own token for a new token to access another resource (no actor token provided, client is the actor)
+	 * DELEGATION: Client exchanges a token on behalf of a user for a new token to access another resource (actor token provided with user context)
+	 */
+
+	let actor: string | undefined;
+
+	//Validate subject token
+	const subjectTokenPayload = await validateTokenExchange({
+		ctx,
+		opts,
+		token: subject_token,
+		token_type: subject_token_type,
+		token_type_allowed: tokenExchange?.allowedSubjectTokenTypes!,
+	});
+
+	if (!subjectTokenPayload || !subjectTokenPayload.sub) {
+		throw new APIError("BAD_REQUEST", {
+			error_description: "sub claim is not provided to determine the subject",
+			error: "invalid_request",
+		});
+	}
+
+	const subject = subjectTokenPayload.sub;
+
+	//verify actor token if provided
+	if (actor_token) {
+		const actorTokenPayload = await validateTokenExchange({
+			ctx,
+			opts,
+			token: actor_token,
+			token_type: actor_token_type,
+			token_type_allowed: tokenExchange?.allowedActorTokenTypes!,
+		});
+
+		actor = actorTokenPayload?.sub ?? actorTokenPayload?.azp;
+	}
+
+	// Validate requested scopes:
+	// - Requested scopes must be a subset of the subject token's scopes
+	// - The actor cannot request more scopes than the subject originally consented to
+	const subTokenScopes = subjectTokenPayload?.scope?.split(" ");
+	let requestedScopes = scope?.split(" ") ?? subTokenScopes;
+
+	if (requestedScopes) {
+		if (subTokenScopes) {
+			const newSubTokenScopes = new Set(subTokenScopes);
+			const invalidSubScopes = requestedScopes.filter(
+				(scope) => !newSubTokenScopes.has(scope),
+			);
+
+			if (invalidSubScopes.length) {
+				throw new APIError("BAD_REQUEST", {
+					error: "invalid_scope",
+					error_description: `The following scopes were not granted in the subject token: ${invalidSubScopes.join(", ")}`,
+				});
+			}
+		} else {
+			// TODO: Add proper scope validation if id_token is allowed as a subject_token.
+		}
+	}
+
+	if (!requestedScopes) {
+		requestedScopes = [];
+	}
+
+	//check audience/resource
+	const audience = await checkResource(ctx, opts, requestedScopes);
+
+	const newTokenPayload: JWTPayload = {
+		sub: subject,
+		azp: client_id,
+		aud: audience ?? subjectTokenPayload?.aud,
+		scope: requestedScopes.join(" "),
+		...(actor_token
+			? {
+					act: {
+						sub: actor,
+					},
+				}
+			: {}),
+	};
+
+	const jwtPluginOptions = opts.disableJwtPlugin
+		? undefined
+		: getJwtPlugin(ctx.context).options;
+
+	//Always generate refresh token
+
+	async function generateRefreshTokenForExchange() {
+		//Just when subject token is representing a user
+		const user = await ctx.context.internalAdapter.findUserById(subject);
+
+		if (!user) {
+			throw new APIError("NOT_FOUND", {
+				error_description: "User not found",
+				error: "invalid_request",
+			});
+		}
+
+		return await createRefreshToken(
+			ctx,
+			opts,
+			user,
+			undefined,
+			client,
+			requestedScopes ?? [],
+			{},
+		);
+	}
+
+	const [accessToken, refreshToken] = await Promise.all([
+		audience && !opts.disableJwtPlugin
+			? signJWT(ctx, {
+					options: jwtPluginOptions,
+					payload: {
+						...newTokenPayload,
+					},
+				})
+			: createOpaqueAccessToken(
+					ctx,
+					opts,
+					undefined,
+					client,
+					requestedScopes ?? [],
+					{
+						...newTokenPayload,
+					},
+				),
+		requested_token_type === "urn:ietf:params:oauth:token-type:refresh_token" &&
+		requestedScopes.includes("offline_access")
+			? generateRefreshTokenForExchange()
+			: undefined,
+	]);
+
+	return ctx.json(
+		{
+			access_token: accessToken,
+			expires_in: opts.accessTokenExpiresIn ?? 3600,
+			expires_at:
+				Math.floor(Date.now() / 1000) + (opts.accessTokenExpiresIn ?? 3600),
+			token_type: "Bearer",
+			scope: newTokenPayload.scope,
+			refresh_token: refreshToken?.token,
+		},
+		{
+			headers: {
+				"Cache-Control": "no-store",
+				Pragma: "no-cache",
+			},
+		},
+	);
+}
+
+async function validateTokenExchange({
+	ctx,
+	opts,
+	token,
+	token_type,
+	token_type_allowed,
+}: {
+	ctx: GenericEndpointContext;
+	opts: OAuthOptions<Scope[]>;
+	token: string;
+	token_type?: TokenTypeIdentifier;
+	token_type_allowed: TokenTypeIdentifier[];
+}): Promise<(JWTPayload & { azp?: string; scope?: string }) | undefined> {
+	let tokenPayload: (JWTPayload & { azp?: string; scope?: string }) | undefined;
+
+	if (token_type && !token_type_allowed?.includes(token_type)) {
+		throw new APIError("BAD_REQUEST", {
+			error_description: "subject_token_type not allowed",
+			error: "invalid_request",
+		});
+	}
+
+	if (!token_type) {
+		try {
+			if (
+				token_type_allowed?.includes(
+					"urn:ietf:params:oauth:token-type:access_token",
+				)
+			)
+				tokenPayload = await validateAccessToken(ctx, opts, token);
+		} catch {
+			if (
+				token_type_allowed?.includes(
+					"urn:ietf:params:oauth:token-type:id_token",
+				)
+			) {
+				tokenPayload = await validateIdToken(ctx, opts, token);
+			}
+		}
+	}
+
+	if (token_type === "urn:ietf:params:oauth:token-type:access_token") {
+		tokenPayload = await validateAccessToken(ctx, opts, token);
+	}
+	if (token_type === "urn:ietf:params:oauth:token-type:id_token") {
+		tokenPayload = await validateIdToken(ctx, opts, token);
+	}
+
+	return tokenPayload;
 }
