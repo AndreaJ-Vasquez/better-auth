@@ -35,11 +35,6 @@ export const schema = {
 				type: "string[]",
 				required: false,
 			},
-			enableTokenExchange: {
-				type: "boolean",
-				required: false,
-				defaultValue: false,
-			},
 			// Recommended client data
 			userId: {
 				type: "string",
@@ -272,6 +267,14 @@ export const schema = {
 			scopes: {
 				type: "string[]",
 				required: true,
+			},
+			/**
+			 * Optional fiel to store the actor who is requesting a token on behalf of another user
+			 * Useful for delegation mode in token exchange when access token is opaque
+			 */
+			act: {
+				type: "json",
+				required: false,
 			},
 		},
 	},

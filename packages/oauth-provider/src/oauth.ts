@@ -112,16 +112,22 @@ export const oauthProvider = <O extends OAuthOptions<Scope[]>>(options: O) => {
 		storeClientSecret: options.disableJwtPlugin ? "encrypted" : "hashed",
 		storeTokens: "hashed",
 		grantTypes: ["authorization_code", "client_credentials", "refresh_token"],
-		tokenExchange: {
-			allowImpersonation: false,
-			allowedActorTokenTypes: [
-				"urn:ietf:params:oauth:token-type:access_token", 
-				"urn:ietf:params:oauth:token-type:id_token"
-			],
-			allowedRquestedTokenTypes: ["urn:ietf:params:oauth:token-type:access_token"],
-			allowedSubjectTokenTypes: ["urn:ietf:params:oauth:token-type:access_token"]
-		},
 		...options,
+		tokenExchange: {
+			allowImpersonation: options.tokenExchange?.allowImpersonation ?? false,
+			allowedActorTokenTypes: options.tokenExchange?.allowedActorTokenTypes ?? [
+				"urn:ietf:params:oauth:token-type:access_token",
+				"urn:ietf:params:oauth:token-type:id_token",
+			],
+			allowedRequestedTokenTypes: options.tokenExchange
+				?.allowedRequestedTokenTypes ?? [
+				"urn:ietf:params:oauth:token-type:access_token",
+			],
+			allowedSubjectTokenTypes: options.tokenExchange
+				?.allowedSubjectTokenTypes ?? [
+				"urn:ietf:params:oauth:token-type:access_token",
+			],
+		},
 		scopes: Array.from(scopes),
 		claims: Array.from(claims),
 		clientRegistrationAllowedScopes,
@@ -584,6 +590,7 @@ export const oauthProvider = <O extends OAuthOptions<Scope[]>>(options: O) => {
 							"authorization_code",
 							"client_credentials",
 							"refresh_token",
+							"urn:ietf:params:oauth:grant-type:token-exchange",
 						]),
 						client_id: z.string().optional(),
 						client_secret: z.string().optional(),
@@ -593,6 +600,11 @@ export const oauthProvider = <O extends OAuthOptions<Scope[]>>(options: O) => {
 						refresh_token: z.string().optional(),
 						resource: z.string().optional(),
 						scope: z.string().optional(),
+						subject_token: z.string().optional(),
+						subject_token_type: z.string().optional(),
+						actor_token: z.string().optional(),
+						actor_token_type: z.string().optional(),
+						requested_token_type: z.string().optional(),
 					}),
 					metadata: {
 						allowedMediaTypes: ["application/x-www-form-urlencoded"],
@@ -652,6 +664,31 @@ export const oauthProvider = <O extends OAuthOptions<Scope[]>>(options: O) => {
 													type: "string",
 													description:
 														"Requested scopes (for client_credentials grant)",
+												},
+												subject_token: {
+													type: "string",
+													description:
+														"A security token representing the identity of the subject for whom the new token is being requested.",
+												},
+												subject_token_type: {
+													type: "string",
+													description:
+														"An identifier indicating the type of the subject_token (e.g., urn:ietf:params:oauth:token-type:access_token).",
+												},
+												actor_token: {
+													type: "string",
+													description:
+														"A security token representing the identity of the acting party in a delegation request.",
+												},
+												actor_token_type: {
+													type: "string",
+													description:
+														"An identifier indicating the type of the actor_token (e.g., urn:ietf:params:oauth:token-type:access_token). Required if actor_token is provided.",
+												},
+												requested_token_type: {
+													type: "string",
+													description:
+														"An identifier indicating the type of security token requested (e.g., urn:ietf:params:oauth:token-type:access_token).",
 												},
 											},
 											required: ["grant_type"],
@@ -1138,6 +1175,7 @@ export const oauthProvider = <O extends OAuthOptions<Scope[]>>(options: O) => {
 									"authorization_code",
 									"client_credentials",
 									"refresh_token",
+									"urn:ietf:params:oauth:grant-type:token-exchange",
 								]),
 							)
 							.default(["authorization_code"])

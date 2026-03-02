@@ -965,10 +965,6 @@ export interface SchemaClient<
 	/** Reference to the owner of this client. Eg. Organization, Team, Profile */
 	referenceId?: string;
 	/**
-	 * Whether to allow this client to use the token exchange endpoint
-	 */
-	enableTokenExchange?: boolean;
-	/**
 	 * Additional metadata about the client.
 	 */
 	metadata?: string; // in JSON format
@@ -1022,6 +1018,12 @@ export interface OAuthOpaqueAccessToken<
 	 * Shall match the refreshId.scopes if refreshId is provided.
 	 */
 	scopes: Scopes;
+
+	/**
+	 * The actor claim for delegation tokens (RFC8693).
+	 * Present when the token was issued via token exchange with an actor_token.
+	 */
+	act?: { sub?: string };
 }
 
 /**

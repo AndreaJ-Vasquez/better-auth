@@ -55,11 +55,8 @@ export async function tokenEndpoint(
 			return handleClientCredentialsGrant(ctx, opts);
 		case "refresh_token":
 			return handleRefreshTokenGrant(ctx, opts);
-		case undefined:
-			throw new APIError("BAD_REQUEST", {
-				error_description: "missing required grant_type",
-				error: "unsupported_grant_type",
-			});
+		case "urn:ietf:params:oauth:grant-type:token-exchange":
+			return handleTokenExchangeGrant(ctx, opts);
 		default:
 			throw new APIError("BAD_REQUEST", {
 				error_description: `unsupported grant_type ${grantType}`,
@@ -263,6 +260,7 @@ async function createOpaqueAccessToken(
 			scopes,
 			createdAt: new Date(iat * 1000),
 			expiresAt: new Date(exp * 1000),
+			act: payload.act,
 		},
 	});
 	return (opts.prefix?.opaqueAccessToken ?? "") + token;
@@ -1151,7 +1149,8 @@ export async function handleTokenExchangeGrant(
 
 	if (!tokenExchange?.allowImpersonation && !actor_token) {
 		throw new APIError("BAD_REQUEST", {
-			error_description: "actor_token is required in delegation mode",
+			error_description:
+				"Impersonation is not allowed, actor_token is required",
 			error: "invalid_request",
 		});
 	}
@@ -1191,7 +1190,7 @@ export async function handleTokenExchangeGrant(
 	) {
 		throw new APIError("BAD_REQUEST", {
 			error_description: "Client not authorized to use token exchange grant",
-			error: "unauthorized_client",
+			error: "unsupported_grant_type",
 		});
 	}
 
@@ -1200,7 +1199,7 @@ export async function handleTokenExchangeGrant(
 		throw new APIError("BAD_REQUEST", {
 			error_description:
 				"Public clients are not allowed to use token exchange grant",
-			error: "invalid_client",
+			error: "unsupported_grant_type",
 		});
 	}
 
@@ -1221,7 +1220,16 @@ export async function handleTokenExchangeGrant(
 		token_type_allowed: tokenExchange?.allowedSubjectTokenTypes!,
 	});
 
-	if (!subjectTokenPayload || !subjectTokenPayload.sub) {
+	if (
+		(subjectTokenPayload as { active?: boolean } | undefined)?.active === false
+	) {
+		throw new APIError("BAD_REQUEST", {
+			error_description: "subject token is not active",
+			error: "invalid_token",
+		});
+	}
+
+	if (!subjectTokenPayload?.sub) {
 		throw new APIError("BAD_REQUEST", {
 			error_description: "sub claim is not provided to determine the subject",
 			error: "invalid_request",
@@ -1240,7 +1248,29 @@ export async function handleTokenExchangeGrant(
 			token_type_allowed: tokenExchange?.allowedActorTokenTypes!,
 		});
 
-		actor = actorTokenPayload?.sub ?? actorTokenPayload?.azp;
+		if ((actorTokenPayload as { active?: boolean })?.active === false) {
+			throw new APIError("BAD_REQUEST", {
+				error_description: "actor token is not active",
+				error: "invalid_token",
+			});
+		}
+
+		if (
+			!actorTokenPayload?.sub &&
+			!actorTokenPayload?.azp &&
+			!actorTokenPayload?.client_id
+		) {
+			throw new APIError("BAD_REQUEST", {
+				error_description:
+					"sub, azp, or client_id claim is required on actor token to determine the actor",
+				error: "invalid_request",
+			});
+		}
+
+		actor =
+			actorTokenPayload?.sub ??
+			actorTokenPayload?.azp ??
+			actorTokenPayload?.client_id;
 	}
 
 	// Validate requested scopes:
@@ -1292,9 +1322,15 @@ export async function handleTokenExchangeGrant(
 		? undefined
 		: getJwtPlugin(ctx.context).options;
 
-	//Always generate refresh token
-
+	//token refresh generation
 	async function generateRefreshTokenForExchange() {
+		if (!client.grantTypes?.includes("refresh_token")) {
+			throw new APIError("BAD_REQUEST", {
+				error: "unauthorized_client",
+				error_description: "Client not authorized to use refresh_token grant",
+			});
+		}
+
 		//Just when subject token is representing a user
 		const user = await ctx.context.internalAdapter.findUserById(subject);
 
@@ -1312,9 +1348,23 @@ export async function handleTokenExchangeGrant(
 			undefined,
 			client,
 			requestedScopes ?? [],
-			{},
+			{
+				...newTokenPayload,
+			},
 		);
 	}
+
+	//Validate refresh token generation
+	const isRefreshToken =
+		requested_token_type === "urn:ietf:params:oauth:token-type:refresh_token" &&
+		requestedScopes.includes("offline_access") &&
+		!actor_token;
+	const isJwtAccessToken = audience && !opts.disableJwtPlugin;
+	//early refreh for opaque access token
+	const earlyRefreshToken =
+		isRefreshToken && !isJwtAccessToken
+			? await generateRefreshTokenForExchange()
+			: undefined;
 
 	const [accessToken, refreshToken] = await Promise.all([
 		audience && !opts.disableJwtPlugin
@@ -1333,9 +1383,10 @@ export async function handleTokenExchangeGrant(
 					{
 						...newTokenPayload,
 					},
+					undefined,
+					earlyRefreshToken?.id,
 				),
-		requested_token_type === "urn:ietf:params:oauth:token-type:refresh_token" &&
-		requestedScopes.includes("offline_access")
+		isRefreshToken && earlyRefreshToken
 			? generateRefreshTokenForExchange()
 			: undefined,
 	]);
@@ -1371,40 +1422,62 @@ async function validateTokenExchange({
 	token: string;
 	token_type?: TokenTypeIdentifier;
 	token_type_allowed: TokenTypeIdentifier[];
-}): Promise<(JWTPayload & { azp?: string; scope?: string }) | undefined> {
-	let tokenPayload: (JWTPayload & { azp?: string; scope?: string }) | undefined;
+}): Promise<
+	| (JWTPayload & { azp?: string; scope?: string; client_id?: string })
+	| undefined
+> {
+	let tokenPayload:
+		| (JWTPayload & { azp?: string; scope?: string; client_id?: string })
+		| undefined;
 
 	if (token_type && !token_type_allowed?.includes(token_type)) {
 		throw new APIError("BAD_REQUEST", {
-			error_description: "subject_token_type not allowed",
+			error_description: "token_type not allowed",
 			error: "invalid_request",
 		});
 	}
 
-	if (!token_type) {
-		try {
-			if (
-				token_type_allowed?.includes(
-					"urn:ietf:params:oauth:token-type:access_token",
-				)
-			)
-				tokenPayload = await validateAccessToken(ctx, opts, token);
-		} catch {
-			if (
-				token_type_allowed?.includes(
-					"urn:ietf:params:oauth:token-type:id_token",
-				)
-			) {
-				tokenPayload = await validateIdToken(ctx, opts, token);
-			}
-		}
-	}
-
+	// When token_type is specified, validate against that specific type
 	if (token_type === "urn:ietf:params:oauth:token-type:access_token") {
 		tokenPayload = await validateAccessToken(ctx, opts, token);
+		return tokenPayload;
 	}
 	if (token_type === "urn:ietf:params:oauth:token-type:id_token") {
 		tokenPayload = await validateIdToken(ctx, opts, token);
+		return tokenPayload;
+	}
+
+	// When token_type is not specified, try allowed types in order
+	// Try access_token first if allowed
+	if (
+		token_type_allowed?.includes(
+			"urn:ietf:params:oauth:token-type:access_token",
+		)
+	) {
+		try {
+			tokenPayload = await validateAccessToken(ctx, opts, token);
+			// Check if validation succeeded (active token with valid claims)
+			if (
+				tokenPayload &&
+				(tokenPayload as { active?: boolean }).active !== false
+			) {
+				return tokenPayload;
+			}
+		} catch {
+			// Continue to try id_token
+		}
+	}
+
+	// Try id_token if allowed and access_token failed or wasn't allowed
+	if (
+		token_type_allowed?.includes("urn:ietf:params:oauth:token-type:id_token")
+	) {
+		try {
+			tokenPayload = await validateIdToken(ctx, opts, token);
+			return tokenPayload;
+		} catch {
+			// Continue, will return undefined
+		}
 	}
 
 	return tokenPayload;

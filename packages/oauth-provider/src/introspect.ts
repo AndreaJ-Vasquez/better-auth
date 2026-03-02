@@ -78,8 +78,11 @@ async function validateJwtAccessToken(
 				return {
 					active: false,
 				};
-			} else if (error.name === "JWTInvalid") {
-				// audience or issuer mismatch
+			} else if (
+				error.name === "JWTInvalid" ||
+				error.name === "JWTClaimValidationFailed"
+			) {
+				// audience, issuer, or other claim mismatch
 				return {
 					active: false,
 				};
@@ -242,6 +245,7 @@ async function validateOpaqueAccessToken(
 		exp: Math.floor(new Date(accessToken.expiresAt).getTime() / 1000),
 		iat: Math.floor(new Date(accessToken.createdAt).getTime() / 1000),
 		scope: accessToken.scopes?.join(" "),
+		act: accessToken.act,
 	} as JWTPayload;
 }
 
@@ -423,6 +427,8 @@ export async function validateIdToken(
 			throw new APIError("BAD_REQUEST", {
 				error_description:
 					"client_id is required to validate ID token without JWT plugin",
+				error_description:
+					"client_id is required to validate ID token without JWT plugin",
 				error: "invalid_request",
 			});
 		}
@@ -515,10 +521,9 @@ export async function validateIdToken(
 		idTokenPayload.exp &&
 		idTokenPayload.exp < Math.floor(Date.now() / 1000)
 	) {
-		throw new APIError("BAD_REQUEST", {
-			error_description: "ID token expired",
-			error: "invalid_token",
-		});
+		return {
+			active: false,
+		};
 	}
 
 	idTokenPayload.active = true;
