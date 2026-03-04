@@ -1150,7 +1150,7 @@ export async function handleTokenExchangeGrant(
 	if (!tokenExchange?.allowImpersonation && !actor_token) {
 		throw new APIError("BAD_REQUEST", {
 			error_description:
-				"Impersonation is not allowed, actor_token is required",
+				"Impersonation mode is disabled. Provide actor_token to perform delegated token exchange.",
 			error: "invalid_request",
 		});
 	}
@@ -1238,9 +1238,16 @@ export async function handleTokenExchangeGrant(
 
 	const subject = subjectTokenPayload.sub;
 
+	let actorTokenPayload:
+		| (JWTPayload & {
+				azp?: string;
+				client_id?: string;
+		  })
+		| undefined;
+
 	//verify actor token if provided
 	if (actor_token) {
-		const actorTokenPayload = await validateTokenExchange({
+		actorTokenPayload = await validateTokenExchange({
 			ctx,
 			opts,
 			token: actor_token,
@@ -1301,9 +1308,24 @@ export async function handleTokenExchangeGrant(
 		requestedScopes = [];
 	}
 
+	// Look up the user by subject ID (may be undefined for M2M tokens)
+	const subjectUser = await ctx.context.internalAdapter.findUserById(subject);
+
 	//check audience/resource
 	const audience = await checkResource(ctx, opts, requestedScopes);
 
+	//custom claims for token exchange
+	const customClaims = tokenExchange?.customAccessTokenExchangeClaims
+		? await tokenExchange.customAccessTokenExchangeClaims({
+				scopes: requestedScopes,
+				subjectJwt: subjectTokenPayload,
+				actorJwt: actorTokenPayload,
+				resource: ctx.body.resource,
+				metadata: parseClientMetadata(client.metadata),
+			})
+		: {};
+
+	//default payload
 	const newTokenPayload: JWTPayload = {
 		sub: subject,
 		azp: client_id,
@@ -1331,10 +1353,8 @@ export async function handleTokenExchangeGrant(
 			});
 		}
 
-		//Just when subject token is representing a user
-		const user = await ctx.context.internalAdapter.findUserById(subject);
-
-		if (!user) {
+		//Refresh tokens require a user
+		if (!subjectUser) {
 			throw new APIError("NOT_FOUND", {
 				error_description: "User not found",
 				error: "invalid_request",
@@ -1344,7 +1364,7 @@ export async function handleTokenExchangeGrant(
 		return await createRefreshToken(
 			ctx,
 			opts,
-			user,
+			subjectUser,
 			undefined,
 			client,
 			requestedScopes ?? [],
@@ -1371,22 +1391,23 @@ export async function handleTokenExchangeGrant(
 			? signJWT(ctx, {
 					options: jwtPluginOptions,
 					payload: {
+						...customClaims,
 						...newTokenPayload,
 					},
 				})
 			: createOpaqueAccessToken(
 					ctx,
 					opts,
-					undefined,
+					subjectUser ?? undefined,
 					client,
 					requestedScopes ?? [],
 					{
 						...newTokenPayload,
 					},
-					undefined,
+					subjectTokenPayload?.reference_id,
 					earlyRefreshToken?.id,
 				),
-		isRefreshToken && earlyRefreshToken
+		isRefreshToken && !earlyRefreshToken
 			? generateRefreshTokenForExchange()
 			: undefined,
 	]);
@@ -1399,7 +1420,7 @@ export async function handleTokenExchangeGrant(
 				Math.floor(Date.now() / 1000) + (opts.accessTokenExpiresIn ?? 3600),
 			token_type: "Bearer",
 			scope: newTokenPayload.scope,
-			refresh_token: refreshToken?.token,
+			refresh_token: refreshToken?.token ?? earlyRefreshToken?.token,
 		},
 		{
 			headers: {
@@ -1423,7 +1444,12 @@ async function validateTokenExchange({
 	token_type?: TokenTypeIdentifier;
 	token_type_allowed: TokenTypeIdentifier[];
 }): Promise<
-	| (JWTPayload & { azp?: string; scope?: string; client_id?: string })
+	| (JWTPayload & {
+			azp?: string;
+			scope?: string;
+			client_id?: string;
+			reference_id?: string;
+	  })
 	| undefined
 > {
 	let tokenPayload:

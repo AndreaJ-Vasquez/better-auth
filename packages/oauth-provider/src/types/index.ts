@@ -716,6 +716,30 @@ export interface OAuthOptions<
 		 * @default: ["urn:ietf:params:oauth:token-type:access_token"]
 		 */
 		allowedRequestedTokenTypes?: RequestedTokenExhangeType[];
+		/**
+		 * Custom claims attached to access tokens issued via token exchange (RFC8693).
+		 *
+		 * it can be used to decide which claims to inherit from the original token or add new claims
+		 * based on the exchange context. The `subjectJwt` payload includes any custom
+		 * claims that were added during the original authorization via `customAccessTokenClaims` (e.g., active_organization, permissions).
+		 * Or add additional claims based on the exchange context
+		 *
+		 * @param info - Context for creating custom claims on exchanged tokens
+		 */
+		customAccessTokenExchangeClaims?: (info: {
+			/** The validated payload of the subject_token being exchanged. Contains standard claims plus any custom claims from the original token. */
+			subjectJwt: JWTPayload;
+			/** The validated payload of the actor_token if provided (delegation flow). Undefined for impersonation flows. */
+			actorJwt?: JWTPayload;
+			/** Scopes granted for the new exchanged token. */
+			scopes: string[];
+			/** The subject user if token is associated to a user. Null if user doesn't exist. */
+			user?: (User & Record<string, unknown>) | null;
+			/** The resource server URI if provided in the exchange request. */
+			resource?: string;
+			/** Additional metadata for the token exchange. */
+			metadata?: Record<string, any>;
+		}) => Awaitable<Record<string, any>>;
 	};
 }
 

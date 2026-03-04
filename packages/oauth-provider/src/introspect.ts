@@ -246,6 +246,7 @@ async function validateOpaqueAccessToken(
 		iat: Math.floor(new Date(accessToken.createdAt).getTime() / 1000),
 		scope: accessToken.scopes?.join(" "),
 		act: accessToken.act,
+		reference_id: accessToken.referenceId,
 	} as JWTPayload;
 }
 
