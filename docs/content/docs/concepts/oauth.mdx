@@ -176,7 +176,7 @@ The additional data is available in your hooks during the OAuth callback through
 This usually works for `/callback/:id` paths and the generic OAuth plugin callback path (`/oauth2/callback/:providerId`).
 </Callout>
 
-Example using a before hook:
+Example using an after hook:
 
 ```ts title="auth.ts"
 import { betterAuth } from "better-auth";
@@ -346,6 +346,12 @@ export const auth = betterAuth({
   },
 });
 ```
+
+<Callout type="info">
+  You may want to pass additional fields into the user object in `mapProfileToUser`,
+  to do this, you must configure the `user.additionalFields` [option](/docs/concepts/database#extending-core-schema).
+  (The same applies for stateless auth setups)
+</Callout>
 
 ### refreshAccessToken
 

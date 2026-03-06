@@ -1,4 +1,8 @@
-import type { AuthContext, BetterAuthOptions } from "@better-auth/core";
+import type {
+	AuthContext,
+	BetterAuthOptions,
+	SecretConfig,
+} from "@better-auth/core";
 import { getBetterAuthVersion } from "@better-auth/core/context";
 import { getAuthTables } from "@better-auth/core/db";
 import type { DBAdapter } from "@better-auth/core/db/adapter";
@@ -19,12 +23,18 @@ import { createInternalAdapter } from "../db/internal-adapter";
 import { DEFAULT_SECRET } from "../utils/constants";
 import { isPromise } from "../utils/is-promise";
 import { checkPassword } from "../utils/password";
-import { getBaseURL } from "../utils/url";
+import { getBaseURL, isDynamicBaseURLConfig } from "../utils/url";
 import {
 	getInternalPlugins,
 	getTrustedOrigins,
+	getTrustedProviders,
 	runPluginInit,
 } from "./helpers";
+import {
+	buildSecretConfig,
+	parseSecretsEnv,
+	validateSecretsArray,
+} from "./secret-utils";
 
 /**
  * Estimates the entropy of a string in bits.
@@ -103,9 +113,27 @@ export async function createAuthContext<Options extends BetterAuthOptions>(
 	const plugins = options.plugins || [];
 	const internalPlugins = getInternalPlugins(options);
 	const logger = createLogger(options.logger);
-	const baseURL = getBaseURL(options.baseURL, options.basePath);
 
-	if (!baseURL) {
+	const isDynamicConfig = isDynamicBaseURLConfig(options.baseURL);
+
+	if (isDynamicBaseURLConfig(options.baseURL)) {
+		const { allowedHosts } = options.baseURL;
+		if (!allowedHosts || allowedHosts.length === 0) {
+			throw new BetterAuthError(
+				"baseURL.allowedHosts cannot be empty. Provide at least one allowed host pattern " +
+					'(e.g., ["myapp.com", "*.vercel.app"]).',
+			);
+		}
+	}
+
+	const baseURL = isDynamicConfig
+		? undefined
+		: getBaseURL(
+				typeof options.baseURL === "string" ? options.baseURL : undefined,
+				options.basePath,
+			);
+
+	if (!baseURL && !isDynamicConfig) {
 		logger.warn(
 			`[better-auth] Base URL could not be determined. Please set a valid base URL using the baseURL config option or the BETTER_AUTH_URL environment variable. Without this, callbacks and redirects may not work correctly.`,
 		);
@@ -123,18 +151,33 @@ Most of the features of Better Auth will not work correctly.`,
 		);
 	}
 
-	const secret =
-		options.secret ||
-		env.BETTER_AUTH_SECRET ||
-		env.AUTH_SECRET ||
-		DEFAULT_SECRET;
+	const secretsArray =
+		options.secrets ?? parseSecretsEnv(env.BETTER_AUTH_SECRETS);
 
-	validateSecret(secret, logger);
+	const legacySecret =
+		options.secret || env.BETTER_AUTH_SECRET || env.AUTH_SECRET || "";
+
+	let secret: string;
+	let secretConfig: string | SecretConfig;
+
+	if (secretsArray) {
+		validateSecretsArray(secretsArray, logger);
+		secret = secretsArray[0]!.value;
+		secretConfig = buildSecretConfig(secretsArray, legacySecret);
+	} else {
+		secret = legacySecret || DEFAULT_SECRET;
+		validateSecret(secret, logger);
+		secretConfig = secret;
+	}
 
 	options = {
 		...options,
 		secret,
-		baseURL: baseURL ? new URL(baseURL).origin : "",
+		baseURL: isDynamicConfig
+			? options.baseURL
+			: baseURL
+				? new URL(baseURL).origin
+				: "",
 		basePath: options.basePath || "/api/auth",
 		plugins: plugins.concat(internalPlugins),
 	};
@@ -205,6 +248,7 @@ Most of the features of Better Auth will not work correctly.`,
 	const hasPluginFn = (id: string) => pluginIds.has(id);
 
 	const trustedOrigins = await getTrustedOrigins(options);
+	const trustedProviders = await getTrustedProviders(options);
 
 	const ctx: AuthContext = {
 		appName: options.appName || "Better Auth",
@@ -220,6 +264,7 @@ Most of the features of Better Auth will not work correctly.`,
 		},
 		tables,
 		trustedOrigins,
+		trustedProviders,
 		isTrustedOrigin(
 			url: string,
 			settings?: {
@@ -276,6 +321,7 @@ Most of the features of Better Auth will not work correctly.`,
 			})(),
 		},
 		secret,
+		secretConfig,
 		rateLimit: {
 			...options.rateLimit,
 			enabled: options.rateLimit?.enabled ?? isProduction,
@@ -307,7 +353,9 @@ Most of the features of Better Auth will not work correctly.`,
 		internalAdapter: createInternalAdapter(adapter, {
 			options,
 			logger,
-			hooks: options.databaseHooks ? [options.databaseHooks] : [],
+			hooks: options.databaseHooks
+				? [{ source: "user", hooks: options.databaseHooks }]
+				: [],
 			generateId: generateIdFunc,
 		}),
 		createAuthCookie: createCookieGetter(options),
