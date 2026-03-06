@@ -40,6 +40,7 @@ export const adminCreateOAuthClient = (opts: OAuthOptions<Scope[]>) =>
 							"authorization_code",
 							"client_credentials",
 							"refresh_token",
+							"urn:ietf:params:oauth:grant-type:token-exchange"
 						]),
 					)
 					.default(["authorization_code"])

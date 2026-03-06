@@ -114,6 +114,7 @@ export const oauthProvider = <O extends OAuthOptions<Scope[]>>(options: O) => {
 		grantTypes: ["authorization_code", "client_credentials", "refresh_token"],
 		...options,
 		tokenExchange: {
+			...options.tokenExchange,
 			allowImpersonation: options.tokenExchange?.allowImpersonation ?? false,
 			allowedActorTokenTypes: options.tokenExchange?.allowedActorTokenTypes ?? [
 				"urn:ietf:params:oauth:token-type:access_token",

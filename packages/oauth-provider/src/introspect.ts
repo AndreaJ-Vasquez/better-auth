@@ -245,8 +245,8 @@ async function validateOpaqueAccessToken(
 		exp: Math.floor(new Date(accessToken.expiresAt).getTime() / 1000),
 		iat: Math.floor(new Date(accessToken.createdAt).getTime() / 1000),
 		scope: accessToken.scopes?.join(" "),
-		act: accessToken.act,
-		reference_id: accessToken.referenceId,
+		act: accessToken.act ?? undefined,
+		reference_id: accessToken.referenceId ?? undefined,
 	} as JWTPayload;
 }
 
@@ -426,8 +426,6 @@ export async function validateIdToken(
 		// When JWT plugin is disabled, ID tokens are signed with the client secret (HS256)
 		if (!clientId) {
 			throw new APIError("BAD_REQUEST", {
-				error_description:
-					"client_id is required to validate ID token without JWT plugin",
 				error_description:
 					"client_id is required to validate ID token without JWT plugin",
 				error: "invalid_request",
