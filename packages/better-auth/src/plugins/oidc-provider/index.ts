@@ -7,6 +7,7 @@ import {
 	createAuthMiddleware,
 } from "@better-auth/core/api";
 import { getCurrentAuthContext } from "@better-auth/core/context";
+import { deprecate } from "@better-auth/core/utils/deprecate";
 import { base64 } from "@better-auth/utils/base64";
 import { createHash } from "@better-auth/utils/hash";
 import type { OpenAPIParameter } from "better-call";
@@ -15,12 +16,14 @@ import * as z from "zod";
 import { APIError, getSessionFromCtx, sessionMiddleware } from "../../api";
 import { expireCookie, parseSetCookieHeader } from "../../cookies";
 import {
+	constantTimeEqual,
 	generateRandomString,
 	symmetricDecrypt,
 	symmetricEncrypt,
 } from "../../crypto";
 import { mergeSchema } from "../../db";
 import { HIDE_METADATA } from "../../utils";
+import { PACKAGE_VERSION } from "../../version";
 import { getJwtToken, verifyJWT } from "../jwt";
 import { authorize } from "./authorize";
 import type { OAuthApplication } from "./schema";
@@ -273,15 +276,28 @@ const DEFAULT_CODE_EXPIRES_IN = 600;
 const DEFAULT_ACCESS_TOKEN_EXPIRES_IN = 3600;
 const DEFAULT_REFRESH_TOKEN_EXPIRES_IN = 604800;
 
+const warnOidcDeprecation = deprecate(
+	() => {},
+	'The "oidc-provider" plugin is deprecated and will be removed in the next major version. ' +
+		"Migrate to @better-auth/oauth-provider. " +
+		"See: https://www.better-auth.com/docs/plugins/oauth-provider",
+);
+
 /**
  * OpenID Connect (OIDC) plugin for Better Auth. This plugin implements the
  * authorization code flow and the token exchange flow. It also implements the
  * userinfo endpoint.
  *
+ * @deprecated Use `@better-auth/oauth-provider` instead. This plugin will be removed in the next major version.
+ * @see https://www.better-auth.com/docs/plugins/oauth-provider
+ *
  * @param options - The options for the OIDC plugin.
  * @returns A Better Auth plugin.
  */
 export const oidcProvider = (options: OIDCOptions) => {
+	if (!options.__skipDeprecationWarning) {
+		warnOidcDeprecation();
+	}
 	const modelName = {
 		oauthClient: "oauthApplication",
 		oauthAccessToken: "oauthAccessToken",
@@ -348,16 +364,15 @@ export const oidcProvider = (options: OIDCOptions) => {
 		clientSecret: string,
 	): Promise<boolean> {
 		if (opts.storeClientSecret === "encrypted") {
-			return (
-				(await symmetricDecrypt({
-					key: ctx.context.secretConfig,
-					data: storedClientSecret,
-				})) === clientSecret
-			);
+			const decrypted = await symmetricDecrypt({
+				key: ctx.context.secretConfig,
+				data: storedClientSecret,
+			});
+			return constantTimeEqual(decrypted, clientSecret);
 		}
 		if (opts.storeClientSecret === "hashed") {
 			const hashedClientSecret = await defaultClientSecretHasher(clientSecret);
-			return hashedClientSecret === storedClientSecret;
+			return constantTimeEqual(hashedClientSecret, storedClientSecret);
 		}
 		if (
 			typeof opts.storeClientSecret === "object" &&
@@ -365,7 +380,7 @@ export const oidcProvider = (options: OIDCOptions) => {
 		) {
 			const hashedClientSecret =
 				await opts.storeClientSecret.hash(clientSecret);
-			return hashedClientSecret === storedClientSecret;
+			return constantTimeEqual(hashedClientSecret, storedClientSecret);
 		}
 		if (
 			typeof opts.storeClientSecret === "object" &&
@@ -373,14 +388,15 @@ export const oidcProvider = (options: OIDCOptions) => {
 		) {
 			const decryptedClientSecret =
 				await opts.storeClientSecret.decrypt(storedClientSecret);
-			return decryptedClientSecret === clientSecret;
+			return constantTimeEqual(decryptedClientSecret, clientSecret);
 		}
 
-		return clientSecret === storedClientSecret;
+		return constantTimeEqual(clientSecret, storedClientSecret);
 	}
 
 	return {
 		id: "oidc-provider",
+		version: PACKAGE_VERSION,
 		hooks: {
 			after: [
 				{
@@ -671,34 +687,56 @@ export const oidcProvider = (options: OIDCOptions) => {
 						ctx.request?.headers.get("authorization") || null;
 					if (
 						authorization &&
-						!client_id &&
 						!client_secret &&
 						authorization.startsWith("Basic ")
 					) {
+						let decoded: string;
 						try {
 							const encoded = authorization.replace("Basic ", "");
-							const decoded = new TextDecoder().decode(base64.decode(encoded));
-							if (!decoded.includes(":")) {
-								throw new APIError("UNAUTHORIZED", {
-									error_description: "invalid authorization header format",
-									error: "invalid_client",
-								});
-							}
-							const [id, secret] = decoded.split(":");
-							if (!id || !secret) {
-								throw new APIError("UNAUTHORIZED", {
-									error_description: "invalid authorization header format",
-									error: "invalid_client",
-								});
-							}
-							client_id = id;
-							client_secret = secret;
+							decoded = new TextDecoder().decode(base64.decode(encoded));
 						} catch {
 							throw new APIError("UNAUTHORIZED", {
 								error_description: "invalid authorization header format",
 								error: "invalid_client",
 							});
 						}
+						// RFC 6749 §2.3.1: split on the first `:` (the secret may contain
+						// further colons), then percent-decode each half before comparing
+						// against stored credentials (the client encodes reserved
+						// characters per RFC 3986 before base64).
+						const colonIndex = decoded.indexOf(":");
+						if (colonIndex === -1) {
+							throw new APIError("UNAUTHORIZED", {
+								error_description: "invalid authorization header format",
+								error: "invalid_client",
+							});
+						}
+						let id: string;
+						let secret: string;
+						try {
+							id = decodeURIComponent(decoded.slice(0, colonIndex));
+							secret = decodeURIComponent(decoded.slice(colonIndex + 1));
+						} catch {
+							throw new APIError("UNAUTHORIZED", {
+								error_description: "invalid authorization header format",
+								error: "invalid_client",
+							});
+						}
+						if (!id || !secret) {
+							throw new APIError("UNAUTHORIZED", {
+								error_description: "invalid authorization header format",
+								error: "invalid_client",
+							});
+						}
+						if (client_id && client_id.toString() !== id) {
+							throw new APIError("UNAUTHORIZED", {
+								error_description:
+									"client_id in body does not match Authorization header",
+								error: "invalid_client",
+							});
+						}
+						client_id = id;
+						client_secret = secret;
 					}
 
 					const now = Date.now();
@@ -750,6 +788,42 @@ export const oidcProvider = (options: OIDCOptions) => {
 								error_description: "refresh token expired",
 								error: "invalid_grant",
 							});
+						}
+						const refreshClient = await getClient(
+							client_id.toString(),
+							trustedClients,
+						);
+						if (!refreshClient) {
+							throw new APIError("UNAUTHORIZED", {
+								error_description: "invalid client_id",
+								error: "invalid_client",
+							});
+						}
+						if (refreshClient.disabled) {
+							throw new APIError("UNAUTHORIZED", {
+								error_description: "client is disabled",
+								error: "invalid_client",
+							});
+						}
+						if (refreshClient.type !== "public") {
+							if (!refreshClient.clientSecret || !client_secret) {
+								throw new APIError("UNAUTHORIZED", {
+									error_description:
+										"client_secret is required for confidential clients",
+									error: "invalid_client",
+								});
+							}
+							const isValidSecret = await verifyStoredClientSecret(
+								ctx,
+								refreshClient.clientSecret,
+								client_secret.toString(),
+							);
+							if (!isValidSecret) {
+								throw new APIError("UNAUTHORIZED", {
+									error_description: "invalid client_secret",
+									error: "invalid_client",
+								});
+							}
 						}
 						const accessToken = generateRandomString(32, "a-z", "A-Z");
 						const newRefreshToken = generateRandomString(32, "a-z", "A-Z");
