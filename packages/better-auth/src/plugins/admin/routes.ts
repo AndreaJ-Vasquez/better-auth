@@ -427,7 +427,7 @@ export const adminUpdateUser = (opts: AdminOptions) =>
 			use: [adminMiddleware],
 			metadata: {
 				openapi: {
-					operationId: "updateUser",
+					operationId: "adminUpdateUser",
 					summary: "Update a user",
 					description: "Update a user's details",
 					responses: {
@@ -728,7 +728,7 @@ export const listUserSessions = (opts: AdminOptions) =>
 			body: listUserSessionsBodySchema,
 			metadata: {
 				openapi: {
-					operationId: "listUserSessions",
+					operationId: "adminListUserSessions",
 					summary: "List user sessions",
 					description: "List user sessions",
 					responses: {
@@ -1460,6 +1460,7 @@ export const removeUser = (opts: AdminOptions) =>
 				throw APIError.from("NOT_FOUND", BASE_ERROR_CODES.USER_NOT_FOUND);
 			}
 
+			await ctx.context.internalAdapter.deleteSessions(ctx.body.userId);
 			await ctx.context.internalAdapter.deleteUser(ctx.body.userId);
 			return ctx.json({
 				success: true,
@@ -1568,13 +1569,11 @@ const userHasPermissionBodySchema = z
 		}),
 	})
 	.and(
-		z.union([
+		z.xor([
 			z.object({
 				permission: z.record(z.string(), z.array(z.string())),
-				permissions: z.undefined(),
 			}),
 			z.object({
-				permission: z.undefined(),
 				permissions: z.record(z.string(), z.array(z.string())),
 			}),
 		]),

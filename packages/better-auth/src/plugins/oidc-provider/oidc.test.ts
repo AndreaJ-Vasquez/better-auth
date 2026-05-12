@@ -22,6 +22,18 @@ import type { OidcClientPlugin } from "./client";
 import { oidcClient } from "./client";
 import type { Client } from "./types";
 
+// Pre-verifies any user the RP creates via OAuth signup so the existing-user
+// path on the RP side does not trip the local-emailVerified gate.
+const autoVerifyUserHook = {
+	user: {
+		create: {
+			before: async (user: Record<string, unknown>) => ({
+				data: { ...user, emailVerified: true },
+			}),
+		},
+	},
+} as const;
+
 // Type for the server client with OIDC plugin
 type ServerClient = AuthClient<{
 	plugins: [OidcClientPlugin];
@@ -200,6 +212,7 @@ describe("oidc", async () => {
 						trustedProviders: ["test"],
 					},
 				},
+				databaseHooks: autoVerifyUserHook,
 				plugins: [
 					genericOAuth({
 						config: [
@@ -286,6 +299,7 @@ describe("oidc", async () => {
 						trustedProviders: ["test"],
 					},
 				},
+				databaseHooks: autoVerifyUserHook,
 				plugins: [
 					genericOAuth({
 						config: [
@@ -375,6 +389,7 @@ describe("oidc", async () => {
 						trustedProviders: ["test"],
 					},
 				},
+				databaseHooks: autoVerifyUserHook,
 				plugins: [
 					genericOAuth({
 						config: [
@@ -460,24 +475,22 @@ describe("oidc", async () => {
 		it("should return login_required error when prompt=none and user not authenticated", async ({
 			expect,
 		}) => {
-			// Create an unauthenticated client
-			const unauthClient = createAuthClient({
-				plugins: [oidcClient()],
-				baseURL: "http://localhost:3000",
-				fetchOptions: {
-					customFetchImpl,
-				},
+			// Create an OAuth client
+			const testClient = await serverClient.oauth2.register({
+				client_name: "test-login-required-prompt-none",
+				redirect_uris: [
+					"http://localhost:3000/api/auth/oauth2/callback/login-required",
+				],
 			});
+			const clientId = testClient.data?.client_id ?? "";
+			const redirectUri = testClient.data?.redirect_uris?.[0] ?? "";
 
 			// Try to authorize with prompt=none
 			const authUrl = new URL(
 				"http://localhost:3000/api/auth/oauth2/authorize",
 			);
-			authUrl.searchParams.set("client_id", application.clientId);
-			authUrl.searchParams.set(
-				"redirect_uri",
-				application.redirectUrls[0] || "",
-			);
+			authUrl.searchParams.set("client_id", clientId);
+			authUrl.searchParams.set("redirect_uri", redirectUri);
 			authUrl.searchParams.set("response_type", "code");
 			authUrl.searchParams.set("scope", "openid profile email");
 			authUrl.searchParams.set("state", "test-state");
@@ -485,18 +498,67 @@ describe("oidc", async () => {
 			authUrl.searchParams.set("code_challenge", "test-challenge");
 			authUrl.searchParams.set("code_challenge_method", "S256");
 
-			let redirectURI = "";
-			await unauthClient.$fetch(authUrl.toString(), {
+			const response = await customFetchImpl(authUrl.toString(), {
 				method: "GET",
-				onError(context) {
-					redirectURI = context.response.headers.get("Location") || "";
-				},
+				redirect: "manual",
 			});
+			const redirectURI = response.headers.get("Location") || "";
 
 			expect(redirectURI).toContain("error=login_required");
 			expect(redirectURI).toContain("error_description=Authentication");
 			expect(redirectURI).toContain("prompt");
 			expect(redirectURI).toContain("none");
+		});
+
+		it("should not redirect to invalid redirect_uri when prompt=none", async ({
+			expect,
+		}) => {
+			const attackerRedirect = "https://malicious.com/callback";
+			const authUrl = new URL(
+				"http://localhost:3000/api/auth/oauth2/authorize",
+			);
+			authUrl.searchParams.set("client_id", application.clientId);
+			authUrl.searchParams.set("redirect_uri", attackerRedirect);
+			authUrl.searchParams.set("response_type", "code");
+			authUrl.searchParams.set("scope", "openid");
+			authUrl.searchParams.set("state", "x");
+			authUrl.searchParams.set("prompt", "none");
+
+			const response = await customFetchImpl(authUrl.toString(), {
+				method: "GET",
+				redirect: "manual",
+			});
+
+			const location = response.headers.get("Location") || "";
+			expect(location === null || location === "").not.toContain(
+				"malicious.com",
+			);
+			expect([400, 302]).toContain(response.status);
+		});
+
+		it("should return 400 invalid_request when prompt=none without redirect_uri", async ({
+			expect,
+		}) => {
+			const authUrl = new URL(
+				"http://localhost:3000/api/auth/oauth2/authorize",
+			);
+			authUrl.searchParams.set("client_id", application.clientId);
+			authUrl.searchParams.set("response_type", "code");
+			authUrl.searchParams.set("scope", "openid");
+			authUrl.searchParams.set("state", "x");
+			authUrl.searchParams.set("prompt", "none");
+			// No redirect_uri - must not fall through to login page
+
+			const response = await customFetchImpl(authUrl.toString(), {
+				method: "GET",
+				redirect: "manual",
+			});
+
+			expect(response.status).toBe(400);
+			const location = response.headers.get("Location") || "";
+			expect(location).not.toContain("/login");
+			const body = await response.json().catch(() => ({}));
+			expect(body.error ?? body.code).toBe("invalid_request");
 		});
 
 		it("should return consent_required error when prompt=none and consent needed", async ({
@@ -1100,6 +1162,7 @@ describe("oidc storage", async () => {
 						trustedProviders: ["test"],
 					},
 				},
+				databaseHooks: autoVerifyUserHook,
 				plugins: [
 					genericOAuth({
 						config: [
@@ -1221,6 +1284,7 @@ describe("oidc token response format", async () => {
 
 		const { customFetchImpl: customFetchImplRP, cookieSetter } =
 			await getTestInstance({
+				databaseHooks: autoVerifyUserHook,
 				plugins: [
 					genericOAuth({
 						config: [
@@ -1480,6 +1544,7 @@ describe("oidc-jwt", async () => {
 						trustedProviders: ["test"],
 					},
 				},
+				databaseHooks: autoVerifyUserHook,
 				plugins: [
 					genericOAuth({
 						config: [
@@ -1606,5 +1671,266 @@ describe("oidc-jwt", async () => {
 
 		// expect(checkSignature.payload).toBeDefined();
 		expect(decoded.alg).toBe(expected);
+	});
+});
+
+/**
+ * @see https://github.com/better-auth/better-auth/security/advisories/GHSA-pw9m-5jxm-xr6h
+ */
+describe("oidc-provider refresh_token grant client authentication", () => {
+	const REFRESH_TOKEN = "pw9m-test-refresh-token";
+	const CLIENT_ID = "pw9m-confidential-test-client";
+	const CLIENT_SECRET = "pw9m-secret-only-the-client-knows";
+
+	async function seedConfidentialClientAndToken(
+		db: Awaited<ReturnType<typeof getTestInstance>>["db"],
+		userId: string,
+	) {
+		await db.create({
+			model: "oauthApplication",
+			data: {
+				clientId: CLIENT_ID,
+				clientSecret: CLIENT_SECRET,
+				type: "web",
+				name: "Confidential Test Client",
+				redirectUrls: "http://localhost/callback",
+				disabled: false,
+				metadata: null,
+				icon: null,
+				userId: null,
+				createdAt: new Date(),
+				updatedAt: new Date(),
+			},
+		});
+		await db.create({
+			model: "oauthAccessToken",
+			data: {
+				accessToken: "stale-access-token-not-used",
+				refreshToken: REFRESH_TOKEN,
+				accessTokenExpiresAt: new Date(Date.now() - 60 * 1000),
+				refreshTokenExpiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
+				clientId: CLIENT_ID,
+				userId,
+				scopes: "openid profile email offline_access",
+				createdAt: new Date(),
+				updatedAt: new Date(),
+			},
+		});
+	}
+
+	it("should reject refresh_token grant on confidential client without client_secret", async () => {
+		const { customFetchImpl, signInWithTestUser, db } = await getTestInstance({
+			plugins: [
+				oidcProvider({
+					loginPage: "/login",
+					consentPage: "/oauth2/authorize",
+					requirePKCE: false,
+				}),
+			],
+		});
+		const { user } = await signInWithTestUser();
+		await seedConfidentialClientAndToken(db, user.id);
+
+		const response = await customFetchImpl(
+			"http://localhost:3000/api/auth/oauth2/token",
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/x-www-form-urlencoded" },
+				body: new URLSearchParams({
+					grant_type: "refresh_token",
+					refresh_token: REFRESH_TOKEN,
+					client_id: CLIENT_ID,
+				}).toString(),
+			},
+		);
+		const body = await response.json().catch(() => null);
+
+		expect(response.status).toBe(401);
+		expect(body?.error).toBe("invalid_client");
+		expect(body?.access_token).toBeUndefined();
+	});
+
+	it("should reject refresh_token grant on confidential client with wrong client_secret", async () => {
+		const { customFetchImpl, signInWithTestUser, db } = await getTestInstance({
+			plugins: [
+				oidcProvider({
+					loginPage: "/login",
+					consentPage: "/oauth2/authorize",
+					requirePKCE: false,
+				}),
+			],
+		});
+		const { user } = await signInWithTestUser();
+		await seedConfidentialClientAndToken(db, user.id);
+
+		const response = await customFetchImpl(
+			"http://localhost:3000/api/auth/oauth2/token",
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/x-www-form-urlencoded" },
+				body: new URLSearchParams({
+					grant_type: "refresh_token",
+					refresh_token: REFRESH_TOKEN,
+					client_id: CLIENT_ID,
+					client_secret: "wrong-secret",
+				}).toString(),
+			},
+		);
+		const body = await response.json().catch(() => null);
+
+		expect(response.status).toBe(401);
+		expect(body?.error).toBe("invalid_client");
+		expect(body?.access_token).toBeUndefined();
+	});
+
+	it("should accept refresh_token grant when client_secret comes via Authorization: Basic", async () => {
+		const { customFetchImpl, signInWithTestUser, db } = await getTestInstance({
+			plugins: [
+				oidcProvider({
+					loginPage: "/login",
+					consentPage: "/oauth2/authorize",
+					requirePKCE: false,
+				}),
+			],
+		});
+		const { user } = await signInWithTestUser();
+		await seedConfidentialClientAndToken(db, user.id);
+
+		const basic = `Basic ${Buffer.from(
+			`${CLIENT_ID}:${CLIENT_SECRET}`,
+		).toString("base64")}`;
+
+		const response = await customFetchImpl(
+			"http://localhost:3000/api/auth/oauth2/token",
+			{
+				method: "POST",
+				headers: {
+					"Content-Type": "application/x-www-form-urlencoded",
+					authorization: basic,
+				},
+				body: new URLSearchParams({
+					grant_type: "refresh_token",
+					refresh_token: REFRESH_TOKEN,
+				}).toString(),
+			},
+		);
+		const body = await response.json().catch(() => null);
+
+		expect(response.status).toBe(200);
+		expect(body?.access_token).toBeDefined();
+		expect(body?.refresh_token).toBeDefined();
+	});
+
+	it("should accept refresh_token grant when Authorization: Basic and matching client_id is in body", async () => {
+		const { customFetchImpl, signInWithTestUser, db } = await getTestInstance({
+			plugins: [
+				oidcProvider({
+					loginPage: "/login",
+					consentPage: "/oauth2/authorize",
+					requirePKCE: false,
+				}),
+			],
+		});
+		const { user } = await signInWithTestUser();
+		await seedConfidentialClientAndToken(db, user.id);
+
+		const basic = `Basic ${Buffer.from(
+			`${CLIENT_ID}:${CLIENT_SECRET}`,
+		).toString("base64")}`;
+
+		const response = await customFetchImpl(
+			"http://localhost:3000/api/auth/oauth2/token",
+			{
+				method: "POST",
+				headers: {
+					"Content-Type": "application/x-www-form-urlencoded",
+					authorization: basic,
+				},
+				body: new URLSearchParams({
+					grant_type: "refresh_token",
+					refresh_token: REFRESH_TOKEN,
+					client_id: CLIENT_ID,
+				}).toString(),
+			},
+		);
+		const body = await response.json().catch(() => null);
+
+		expect(response.status).toBe(200);
+		expect(body?.access_token).toBeDefined();
+	});
+
+	it("should reject refresh_token grant when body client_id does not match Authorization: Basic", async () => {
+		const { customFetchImpl, signInWithTestUser, db } = await getTestInstance({
+			plugins: [
+				oidcProvider({
+					loginPage: "/login",
+					consentPage: "/oauth2/authorize",
+					requirePKCE: false,
+				}),
+			],
+		});
+		const { user } = await signInWithTestUser();
+		await seedConfidentialClientAndToken(db, user.id);
+
+		const basic = `Basic ${Buffer.from(
+			`${CLIENT_ID}:${CLIENT_SECRET}`,
+		).toString("base64")}`;
+
+		const response = await customFetchImpl(
+			"http://localhost:3000/api/auth/oauth2/token",
+			{
+				method: "POST",
+				headers: {
+					"Content-Type": "application/x-www-form-urlencoded",
+					authorization: basic,
+				},
+				body: new URLSearchParams({
+					grant_type: "refresh_token",
+					refresh_token: REFRESH_TOKEN,
+					client_id: "different-client-id",
+				}).toString(),
+			},
+		);
+		const body = await response.json().catch(() => null);
+
+		expect(response.status).toBe(401);
+		expect(body?.error).toBe("invalid_client");
+	});
+
+	it("should reject refresh_token grant when the confidential client is disabled", async () => {
+		const { customFetchImpl, signInWithTestUser, db } = await getTestInstance({
+			plugins: [
+				oidcProvider({
+					loginPage: "/login",
+					consentPage: "/oauth2/authorize",
+					requirePKCE: false,
+				}),
+			],
+		});
+		const { user } = await signInWithTestUser();
+		await seedConfidentialClientAndToken(db, user.id);
+		await db.update<{ disabled: boolean }>({
+			model: "oauthApplication",
+			where: [{ field: "clientId", value: CLIENT_ID }],
+			update: { disabled: true },
+		});
+
+		const response = await customFetchImpl(
+			"http://localhost:3000/api/auth/oauth2/token",
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/x-www-form-urlencoded" },
+				body: new URLSearchParams({
+					grant_type: "refresh_token",
+					refresh_token: REFRESH_TOKEN,
+					client_id: CLIENT_ID,
+					client_secret: CLIENT_SECRET,
+				}).toString(),
+			},
+		);
+		const body = await response.json().catch(() => null);
+		expect(response.status).toBe(401);
+		expect(body?.error).toBe("invalid_client");
+		expect(body?.access_token).toBeUndefined();
 	});
 });

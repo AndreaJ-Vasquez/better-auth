@@ -16,6 +16,13 @@ import type {
 	UpdateQueryBuilder,
 } from "kysely";
 import { sql } from "kysely";
+import {
+	insensitiveEq,
+	insensitiveIlike,
+	insensitiveIn,
+	insensitiveNe,
+	insensitiveNotIn,
+} from "./query-builders";
 import type { KyselyDatabaseType } from "./types";
 
 interface KyselyAdapterConfig {
@@ -52,6 +59,7 @@ export const kyselyAdapter = (
 	let lazyOptions: BetterAuthOptions | null = null;
 	const createCustomAdapter = (
 		db: Kysely<any>,
+		inTransaction = false,
 	): AdapterFactoryCustomizeAdapterCreator => {
 		return ({
 			getFieldName,
@@ -122,12 +130,17 @@ export const kyselyAdapter = (
 						return res;
 					}
 
-					const value = values[field] || where[0]?.value;
+					const value =
+						values[field] !== undefined ? values[field] : where[0]?.value;
 					res = await db
 						.selectFrom(model)
 						.selectAll()
 						.orderBy(getFieldName({ model, field }), "desc")
-						.where(getFieldName({ model, field }), "=", value)
+						.where(
+							getFieldName({ model, field }),
+							value === null ? "is" : "=",
+							value,
+						)
 						.limit(1)
 						.executeTakeFirst();
 					return res;
@@ -155,8 +168,9 @@ export const kyselyAdapter = (
 					const {
 						field: _field,
 						value: _value,
-						operator = "=",
+						operator = "eq",
 						connector = "AND",
+						mode = "sensitive",
 					} = condition;
 					const value: any = _value;
 					const field: string | any = getFieldName({
@@ -164,33 +178,72 @@ export const kyselyAdapter = (
 						field: _field,
 					});
 
+					const isInsensitive =
+						mode === "insensitive" &&
+						(typeof value === "string" ||
+							(Array.isArray(value) &&
+								value.every((v) => typeof v === "string")));
+
 					const expr = (eb: any) => {
 						const f = `${model}.${field}`;
 						if (operator.toLowerCase() === "in") {
+							if (isInsensitive) {
+								const arr = Array.isArray(value) ? value : [value];
+								const { lhs, values } = insensitiveIn(f, arr);
+								return eb(lhs, "in", values);
+							}
 							return eb(f, "in", Array.isArray(value) ? value : [value]);
 						}
 
 						if (operator.toLowerCase() === "not_in") {
+							if (isInsensitive) {
+								const arr = Array.isArray(value) ? value : [value];
+								const { lhs, values } = insensitiveNotIn(f, arr);
+								return eb(lhs, "not in", values);
+							}
 							return eb(f, "not in", Array.isArray(value) ? value : [value]);
 						}
 
 						if (operator === "contains") {
+							if (isInsensitive && typeof value === "string") {
+								return insensitiveIlike(f, `%${value}%`, config?.type);
+							}
 							return eb(f, "like", `%${value}%`);
 						}
 
 						if (operator === "starts_with") {
+							if (isInsensitive && typeof value === "string") {
+								return insensitiveIlike(f, `${value}%`, config?.type);
+							}
 							return eb(f, "like", `${value}%`);
 						}
 
 						if (operator === "ends_with") {
+							if (isInsensitive && typeof value === "string") {
+								return insensitiveIlike(f, `%${value}`, config?.type);
+							}
 							return eb(f, "like", `%${value}`);
 						}
 
 						if (operator === "eq") {
+							if (value === null) {
+								return eb(f, "is", null);
+							}
+							if (isInsensitive && typeof value === "string") {
+								const { lhs, value: v } = insensitiveEq(f, value);
+								return eb(lhs, "=", v);
+							}
 							return eb(f, "=", value);
 						}
 
 						if (operator === "ne") {
+							if (value === null) {
+								return eb(f, "is not", null);
+							}
+							if (isInsensitive && typeof value === "string") {
+								const { lhs, value: v } = insensitiveNe(f, value);
+								return eb(lhs, "<>", v);
+							}
 							return eb(f, "<>", value);
 						}
 
@@ -610,6 +663,81 @@ export const kyselyAdapter = (
 						? Number.MAX_SAFE_INTEGER
 						: Number(res);
 				},
+				async consumeOne({ model, where }) {
+					const { and, or } = convertWhereClause(model, where);
+					const applyWhere = (query: any) => {
+						if (and) {
+							query = query.where((eb: any) =>
+								eb.and(and.map((expr) => expr(eb))),
+							);
+						}
+						if (or) {
+							query = query.where((eb: any) =>
+								eb.or(or.map((expr) => expr(eb))),
+							);
+						}
+						return query;
+					};
+					const idField = getFieldName({ model, field: "id" });
+					const deleteSelectedRow = async (db: any, row: any) => {
+						const targetId = row[idField] ?? row.id;
+						if (targetId === undefined || targetId === null) {
+							return null;
+						}
+						const query: any = db
+							.deleteFrom(model)
+							.where(`${model}.${idField}`, "=", targetId);
+
+						if (config?.type === "mysql") {
+							const result = await query.executeTakeFirst();
+							return Number(result.numDeletedRows) > 0 ? row : null;
+						}
+
+						if (config?.type === "mssql") {
+							return (
+								(await query.outputAll("deleted").executeTakeFirst()) ?? null
+							);
+						}
+
+						return (await query.returningAll().executeTakeFirst()) ?? null;
+					};
+					const deleteWithReturning = async (query: any) => {
+						if (config?.type === "mssql") {
+							return (
+								(await query.outputAll("deleted").executeTakeFirst()) ?? null
+							);
+						}
+						return (await query.returningAll().executeTakeFirst()) ?? null;
+					};
+
+					if (config?.type === "mysql") {
+						// MySQL does not support `DELETE ... RETURNING`. Hold the row
+						// under `SELECT ... FOR UPDATE`, then delete inside the same
+						// transaction. Concurrent claimants block until the lock
+						// releases, at which point the row is gone and they observe
+						// nothing.
+						const claimFromTransaction = async (trx: any) => {
+							const row = await applyWhere(
+								trx.selectFrom(model).selectAll().forUpdate(),
+							)
+								.limit(1)
+								.executeTakeFirst();
+							if (!row) return null;
+							return deleteSelectedRow(trx, row);
+						};
+						return inTransaction
+							? claimFromTransaction(db)
+							: db.transaction().execute(claimFromTransaction);
+					}
+
+					const targetIds = applyWhere(
+						db.selectFrom(model).select(`${model}.${idField}`),
+					).limit(1);
+					const query = db
+						.deleteFrom(model)
+						.where(`${model}.${idField}`, "in", targetIds);
+					return deleteWithReturning(query);
+				},
 				options: config,
 			};
 		};
@@ -642,8 +770,11 @@ export const kyselyAdapter = (
 				? (cb) =>
 						db.transaction().execute((trx) => {
 							const adapter = createAdapterFactory({
-								config: adapterOptions!.config,
-								adapter: createCustomAdapter(trx),
+								config: {
+									...adapterOptions!.config,
+									transaction: false,
+								},
+								adapter: createCustomAdapter(trx, true),
 							})(lazyOptions!);
 							return cb(adapter);
 						})
