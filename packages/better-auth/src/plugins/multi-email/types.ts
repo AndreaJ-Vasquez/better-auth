@@ -20,11 +20,6 @@ export type MultiEmailOptions = {
 	 */
 	verificationTokenExpiration?: number;
 	/**
-	 * Allow unverified emails to be used for sign-in.
-	 * @default false
-	 */
-	allowUnverifiedSignIn?: boolean;
-	/**
 	 * Custom function to generate verification token.
 	 */
 	generateVerificationToken?: (data: {

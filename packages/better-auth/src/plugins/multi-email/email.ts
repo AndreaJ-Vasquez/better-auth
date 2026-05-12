@@ -1,9 +1,9 @@
 import type { GenericEndpointContext } from "@better-auth/core";
-import type { MultiEmailOptions } from "./types";
-import { multiEmailAdapter } from "./adapter";
 import { APIError } from "better-call";
-import { MULTI_EMAIL_ERROR_CODES } from "./const";
 import { generateRandomString } from "../../crypto";
+import { multiEmailAdapter } from "./adapter";
+import { MULTI_EMAIL_ERROR_CODES } from "./const";
+import type { MultiEmailOptions } from "./types";
 
 async function sendVerificationEmail(
 	ctx: GenericEndpointContext,
@@ -13,12 +13,13 @@ async function sendVerificationEmail(
 ) {
 	if (!opts.onEmailAdded) return;
 
+	const normalizedEmail = email.toLowerCase();
 	const token = opts.generateVerificationToken
-		? await opts.generateVerificationToken({ email, userId })
+		? await opts.generateVerificationToken({ email: normalizedEmail, userId })
 		: generateRandomString(32);
 
 	await ctx.context.internalAdapter.createVerificationValue({
-		value: JSON.stringify({ email }),
+		value: JSON.stringify({ email: normalizedEmail }),
 		identifier: `multi-email-verify:${token}`,
 		expiresAt: new Date(
 			Date.now() + (opts.verificationTokenExpiration || 3600) * 1000,
@@ -27,7 +28,7 @@ async function sendVerificationEmail(
 
 	const url = `${ctx.context.baseURL}/multi-email/verify?token=${token}`;
 
-	await opts.onEmailAdded({ email, userId, token, url });
+	await opts.onEmailAdded({ email: normalizedEmail, userId, token, url });
 }
 
 /**
@@ -38,10 +39,11 @@ export async function addEmail(
 	opts: MultiEmailOptions,
 ) {
 	const { email }: { email: string } = ctx.body;
+	const normalizedEmail = email.toLowerCase();
 
 	const userId = ctx.context.session?.user.id;
 
-	const adapter = multiEmailAdapter(ctx.context.adapter, opts);
+	const adapter = multiEmailAdapter(ctx.context.adapter);
 
 	const userEmails = await adapter.findUserEmails(userId!);
 	if (userEmails.length >= (opts.maxEmails || 5)) {
@@ -51,7 +53,7 @@ export async function addEmail(
 	}
 
 	//check if email already exists
-	const emailExists = await adapter.findEmail(email);
+	const emailExists = await adapter.findEmail(normalizedEmail);
 
 	if (emailExists) {
 		throw new APIError("BAD_REQUEST", {
@@ -60,11 +62,11 @@ export async function addEmail(
 	}
 
 	const newEmail = await adapter.addEmail({
-		email,
+		email: normalizedEmail,
 		userId: userId!,
 	});
 
-	await sendVerificationEmail(ctx, opts, email, userId!);
+	await sendVerificationEmail(ctx, opts, normalizedEmail, userId!);
 
 	return newEmail;
 }
@@ -90,7 +92,7 @@ export async function verifyEmail(
 		});
 	}
 
-	const adapter = multiEmailAdapter(ctx.context.adapter, opts);
+	const adapter = multiEmailAdapter(ctx.context.adapter);
 
 	const verification = await ctx.context.internalAdapter.findVerificationValue(
 		`multi-email-verify:${token}`,
@@ -114,6 +116,7 @@ export async function verifyEmail(
 
 	await adapter.updateEmail(emailRecord.id, {
 		emailVerified: true,
+		verifiedAt: new Date(),
 	});
 
 	await ctx.context.internalAdapter.deleteVerificationByIdentifier(
@@ -122,8 +125,8 @@ export async function verifyEmail(
 
 	if (opts.onEmailVerified) {
 		await opts.onEmailVerified({
-			email: email.email,
-			userId: email.userId,
+			email: emailRecord.email,
+			userId: emailRecord.userId,
 		});
 	}
 
@@ -142,6 +145,7 @@ export async function resendVerification(
 	opts: MultiEmailOptions,
 ) {
 	const { email }: { email: string } = ctx.body;
+	const normalizedEmail = email.toLowerCase();
 	const userId = ctx.context.session?.user.id;
 
 	if (!opts.onEmailAdded) {
@@ -150,9 +154,9 @@ export async function resendVerification(
 		});
 	}
 
-	const adapter = multiEmailAdapter(ctx.context.adapter, opts);
+	const adapter = multiEmailAdapter(ctx.context.adapter);
 
-	const emailRecord = await adapter.findEmail(email, userId);
+	const emailRecord = await adapter.findEmail(normalizedEmail, userId);
 
 	if (!emailRecord) {
 		throw new APIError("BAD_REQUEST", {
@@ -166,7 +170,7 @@ export async function resendVerification(
 		});
 	}
 
-	await sendVerificationEmail(ctx, opts, email, userId!);
+	await sendVerificationEmail(ctx, opts, normalizedEmail, userId!);
 
 	return ctx.json({ success: true });
 }
@@ -179,11 +183,12 @@ export async function removeEmail(
 	opts: MultiEmailOptions,
 ) {
 	const { email }: { email: string } = ctx.body;
+	const normalizedEmail = email.toLowerCase();
 	const userId = ctx.context.session?.user.id;
 
-	const adapter = multiEmailAdapter(ctx.context.adapter, opts);
+	const adapter = multiEmailAdapter(ctx.context.adapter);
 
-	const emailRecord = await adapter.findEmail(email, userId);
+	const emailRecord = await adapter.findEmail(normalizedEmail, userId);
 
 	if (!emailRecord) {
 		throw new APIError("NOT_FOUND", {
@@ -221,11 +226,12 @@ export async function setPrimaryEmail(
 	opts: MultiEmailOptions,
 ) {
 	const { email }: { email: string } = ctx.body;
+	const normalizedEmail = email.toLowerCase();
 	const userId = ctx.context.session?.user.id;
 
-	const adapter = multiEmailAdapter(ctx.context.adapter, opts);
+	const adapter = multiEmailAdapter(ctx.context.adapter);
 
-	const targetEmail = await adapter.findEmail(email, userId);
+	const targetEmail = await adapter.findEmail(normalizedEmail, userId);
 
 	if (!targetEmail) {
 		throw new APIError("NOT_FOUND", {
@@ -273,13 +279,10 @@ export async function setPrimaryEmail(
 /**
  * List all emails associated with the user's account.
  */
-export async function listEmails(
-	ctx: GenericEndpointContext,
-	opts: MultiEmailOptions,
-) {
+export async function listEmails(ctx: GenericEndpointContext) {
 	const userId = ctx.context.session?.user.id;
 
-	const adapter = multiEmailAdapter(ctx.context.adapter, opts);
+	const adapter = multiEmailAdapter(ctx.context.adapter);
 
 	const emails = await adapter.findUserEmails(userId!);
 

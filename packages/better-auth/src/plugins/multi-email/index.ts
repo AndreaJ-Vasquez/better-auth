@@ -1,14 +1,15 @@
 import type { BetterAuthPlugin } from "@better-auth/core";
+import { createAuthEndpoint } from "@better-auth/core/api";
+import type { User } from "@better-auth/core/db";
+import { APIError } from "better-call";
+import * as z from "zod";
+import { sessionMiddleware } from "../../api";
+import { multiEmailAdapter } from "./adapter";
 import {
 	ID_MULTI_EMAIL,
-	MULTI_EMAIL_ERROR_CODES,
 	MODEL_MULTI_EMAIL,
+	MULTI_EMAIL_ERROR_CODES,
 } from "./const";
-import { createAuthEndpoint } from "@better-auth/core/api";
-import { APIError } from "better-call";
-import { schema } from "./schema";
-import type { MultiEmailOptions } from "./types";
-import * as z from "zod";
 import {
 	addEmail,
 	listEmails,
@@ -17,13 +18,11 @@ import {
 	setPrimaryEmail,
 	verifyEmail,
 } from "./email";
-import type { User } from "@better-auth/core/db";
-import { multiEmailAdapter } from "./adapter";
-import { sessionMiddleware } from "../../api";
+import { schema } from "./schema";
+import type { MultiEmailOptions } from "./types";
 
 export const multiEmail = (options?: MultiEmailOptions) => {
 	const opts: MultiEmailOptions = {
-		allowUnverifiedSignIn: false,
 		maxEmails: 5,
 		requireVerificationOnPrimarySet: true,
 		verificationTokenExpiration: 60 * 60, // 1 hour
@@ -49,7 +48,7 @@ export const multiEmail = (options?: MultiEmailOptions) => {
 						model: MODEL_MULTI_EMAIL,
 						data: {
 							userId: u.id,
-							email: u.email,
+							email: u.email.toLowerCase(),
 							emailVerified: u.emailVerified,
 							isPrimary: true,
 							verifiedAt: u.emailVerified ? new Date() : undefined,
@@ -65,8 +64,8 @@ export const multiEmail = (options?: MultiEmailOptions) => {
 							create: {
 								async before(user, ctx) {
 									//Verify if email already exists in multi-email table to avoid duplicates and conflicts
-									if (!ctx) return;
-									const adapter = multiEmailAdapter(ctx.context.adapter, opts);
+									if (!ctx || !user.email) return;
+									const adapter = multiEmailAdapter(ctx.context.adapter);
 
 									const email = await adapter.findEmail(user.email);
 
@@ -79,8 +78,8 @@ export const multiEmail = (options?: MultiEmailOptions) => {
 								async after(user, ctx) {
 									//When a new user is created add their email to the multi-email table for
 									// a better control over secondary emails
-									if (!ctx) return;
-									const adapter = multiEmailAdapter(ctx.context.adapter, opts);
+									if (!ctx || !user.email) return;
+									const adapter = multiEmailAdapter(ctx.context.adapter);
 
 									const email = await adapter.findEmail(user.email);
 
@@ -88,6 +87,9 @@ export const multiEmail = (options?: MultiEmailOptions) => {
 										await adapter.addEmail({
 											email: user.email,
 											userId: user.id,
+											emailVerified: user.emailVerified,
+											isPrimary: true,
+											verifiedAt: user.emailVerified ? new Date() : undefined,
 										});
 									}
 								},
@@ -95,7 +97,7 @@ export const multiEmail = (options?: MultiEmailOptions) => {
 							update: {
 								async before(user, ctx) {
 									if (!ctx || !user.email) return;
-									const adapter = multiEmailAdapter(ctx.context.adapter, opts);
+									const adapter = multiEmailAdapter(ctx.context.adapter);
 									const newEmail = user.email.toLowerCase();
 
 									const emailExists = await adapter.findEmail(newEmail);
@@ -125,11 +127,18 @@ export const multiEmail = (options?: MultiEmailOptions) => {
 											isPrimary: true,
 											emailVerified:
 												user.emailVerified ?? emailExists.emailVerified,
+											verifiedAt:
+												(user.emailVerified ?? emailExists.emailVerified)
+													? (emailExists.verifiedAt ?? new Date())
+													: undefined,
 										});
 									} else {
 										await adapter.addEmail({
 											email: newEmail,
 											userId: userId,
+											emailVerified: user.emailVerified ?? false,
+											isPrimary: true,
+											verifiedAt: user.emailVerified ? new Date() : undefined,
 										});
 									}
 
@@ -191,7 +200,7 @@ export const multiEmail = (options?: MultiEmailOptions) => {
 					},
 				},
 				async (ctx) => {
-					await addEmail(ctx, opts);
+					return addEmail(ctx, opts);
 				},
 			),
 			verifyEmail: createAuthEndpoint(
@@ -234,7 +243,7 @@ export const multiEmail = (options?: MultiEmailOptions) => {
 					},
 				},
 				async (ctx) => {
-					await verifyEmail(ctx, opts);
+					return verifyEmail(ctx, opts);
 				},
 			),
 			resendVerification: createAuthEndpoint(
@@ -273,7 +282,7 @@ export const multiEmail = (options?: MultiEmailOptions) => {
 					},
 				},
 				async (ctx) => {
-					await resendVerification(ctx, opts);
+					return resendVerification(ctx, opts);
 				},
 			),
 			removeEmail: createAuthEndpoint(
@@ -311,7 +320,7 @@ export const multiEmail = (options?: MultiEmailOptions) => {
 					},
 				},
 				async (ctx) => {
-					await removeEmail(ctx, opts);
+					return removeEmail(ctx, opts);
 				},
 			),
 			setPrimaryEmail: createAuthEndpoint(
@@ -349,7 +358,7 @@ export const multiEmail = (options?: MultiEmailOptions) => {
 					},
 				},
 				async (ctx) => {
-					await setPrimaryEmail(ctx, opts);
+					return setPrimaryEmail(ctx, opts);
 				},
 			),
 			listEmails: createAuthEndpoint(
@@ -407,7 +416,7 @@ export const multiEmail = (options?: MultiEmailOptions) => {
 					},
 				},
 				async (ctx) => {
-					return listEmails(ctx, opts);
+					return listEmails(ctx);
 				},
 			),
 		},

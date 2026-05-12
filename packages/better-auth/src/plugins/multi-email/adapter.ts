@@ -1,22 +1,27 @@
-import type { DBAdapter } from "@better-auth/core/db/adapter";
 import type { BetterAuthOptions } from "@better-auth/core";
-import type { MultiEmailOptions, MultiEmail } from "./types";
+import type { DBAdapter } from "@better-auth/core/db/adapter";
 import { MODEL_MULTI_EMAIL } from "./const";
+import type { MultiEmail } from "./types";
 
-export const multiEmailAdapter = (
-	adapter: DBAdapter<BetterAuthOptions>,
-	options?: MultiEmailOptions,
-) => {
+const normalizeEmail = (email: string) => email.toLowerCase();
+
+export const multiEmailAdapter = (adapter: DBAdapter<BetterAuthOptions>) => {
 	return {
-		addEmail: async ({ email, userId }: { email: string; userId: string }) => {
+		addEmail: async (
+			data: Pick<MultiEmail, "email" | "userId"> &
+				Partial<Pick<MultiEmail, "emailVerified" | "isPrimary" | "verifiedAt">>,
+		) => {
 			const emailResult = await adapter.create<
-				Pick<MultiEmail, "email" | "userId">,
+				Pick<MultiEmail, "email" | "userId"> &
+					Partial<
+						Pick<MultiEmail, "emailVerified" | "isPrimary" | "verifiedAt">
+					>,
 				MultiEmail
 			>({
 				model: MODEL_MULTI_EMAIL,
 				data: {
-					email,
-					userId,
+					...data,
+					email: normalizeEmail(data.email),
 				},
 			});
 
@@ -28,7 +33,7 @@ export const multiEmailAdapter = (
 				where: [
 					{
 						field: "email",
-						value: email.toLowerCase(),
+						value: normalizeEmail(email),
 					},
 					...(userId ? [{ field: "userId", value: userId }] : []),
 				],
@@ -69,7 +74,9 @@ export const multiEmailAdapter = (
 		},
 		updateEmail: async (
 			emailId: string,
-			data: Partial<Pick<MultiEmail, "isPrimary" | "emailVerified">>,
+			data: Partial<
+				Pick<MultiEmail, "isPrimary" | "emailVerified" | "verifiedAt">
+			>,
 		) => {
 			const emailResult = await adapter.update<MultiEmail>({
 				model: MODEL_MULTI_EMAIL,
@@ -90,7 +97,7 @@ export const multiEmailAdapter = (
 				where: [
 					{
 						field: "email",
-						value: email.toLowerCase(),
+						value: normalizeEmail(email),
 					},
 				],
 			});
