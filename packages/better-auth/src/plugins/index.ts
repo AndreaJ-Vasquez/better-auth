@@ -26,3 +26,4 @@ export * from "./siwe";
 export * from "./test-utils";
 export * from "./two-factor";
 export * from "./username";
+export * from "./multi-email";
