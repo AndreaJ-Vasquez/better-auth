@@ -3,7 +3,7 @@ import { createAuthEndpoint } from "@better-auth/core/api";
 import type { User } from "@better-auth/core/db";
 import { APIError } from "better-call";
 import * as z from "zod";
-import { sessionMiddleware } from "../../api";
+import { createAuthMiddleware, sessionMiddleware } from "../../api";
 import { multiEmailAdapter } from "./adapter";
 import {
 	ID_MULTI_EMAIL,
@@ -152,9 +152,106 @@ export const multiEmail = (options?: MultiEmailOptions) => {
 				},
 			};
 		},
+		hooks: {
+			before: [
+				{
+					matcher: (context) =>
+						(context.path?.startsWith("/callback/") &&
+							context.method === "GET") ??
+						false,
+					handler: createAuthMiddleware(async (ctx) => {
+						const originalFindOAuthUser =
+							ctx.context.internalAdapter.findOAuthUser;
+
+						if (!originalFindOAuthUser) return;
+
+						ctx.context.internalAdapter.findOAuthUser = async (
+							email: string,
+							accountId: string,
+							providerId: string,
+						) => {
+							//Find the user using the original method (which checks the accounts table)
+							const result = await originalFindOAuthUser(
+								email,
+								accountId,
+								providerId,
+							);
+
+							if (result?.user) {
+								return result;
+							}
+
+							// If no user was found, check if there's a verified email in the multi-email table that matches the OAuth email
+							const adapter = multiEmailAdapter(ctx.context.adapter);
+							const multiEmailRecord = await adapter.findEmail(
+								email.toLowerCase(),
+							);
+
+							if (multiEmailRecord && multiEmailRecord.emailVerified) {
+								const user = await ctx.context.adapter.findOne<User>({
+									model: "user",
+									where: [{ field: "id", value: multiEmailRecord.userId }],
+								});
+
+								if (user) {
+									const accounts =
+										await ctx.context.internalAdapter.findAccounts(user.id);
+
+									return {
+										user,
+										linkedAccount: null,
+										accounts,
+									};
+								}
+							}
+
+							return result;
+						};
+					}),
+				},
+			],
+			after: [
+				{
+					matcher: (context) =>
+						(context.path?.startsWith("/callback/") &&
+							context.method === "GET") ??
+						false,
+					handler: createAuthMiddleware(async (ctx) => {
+						// After oauth callback, ensure the user's email is added to the multi-email table
+						if (ctx.context.session?.user) {
+							const userId = ctx.context.session.user.id;
+							const userEmail = ctx.context.session.user.email;
+
+							const adapter = multiEmailAdapter(ctx.context.adapter);
+
+							const existingMultiEmail = await adapter.findEmail(
+								userEmail.toLowerCase(),
+								userId,
+							);
+
+							if (!existingMultiEmail) {
+								const primaryEmail = await adapter.findPrimaryEmail(userId);
+
+								if (primaryEmail?.email !== userEmail.toLowerCase()) {
+									await adapter.addEmail({
+										email: userEmail.toLowerCase(),
+										userId: userId,
+										emailVerified: ctx.context.session.user.emailVerified,
+										isPrimary: false,
+										verifiedAt: ctx.context.session.user.emailVerified
+											? new Date()
+											: undefined,
+									});
+								}
+							}
+						}
+					}),
+				},
+			],
+		},
 		endpoints: {
 			addEmail: createAuthEndpoint(
-				`${ID_MULTI_EMAIL}/add`,
+				"/multi-email/add",
 				{
 					use: [sessionMiddleware],
 					method: "POST",

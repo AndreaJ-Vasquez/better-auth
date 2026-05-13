@@ -17,6 +17,7 @@ export * from "../../plugins/generic-oauth/client";
 export * from "../../plugins/jwt/client";
 export * from "../../plugins/last-login-method/client";
 export * from "../../plugins/magic-link/client";
+export * from "../../plugins/multi-email/client";
 export * from "../../plugins/multi-session/client";
 export * from "../../plugins/oidc-provider/client";
 export * from "../../plugins/one-tap/client";
